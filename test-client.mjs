@@ -307,5 +307,53 @@ check('the two-different-yardsticks caveat is shown to the user',
 check('token cost carries a relative bar so magnitudes are visible',
   /barTrack/.test(source) && /barFill/.test(source) && /maxTokens/.test(source));
 
+console.log('\n== the tool list collapses instead of overflowing ==');
+// 折叠的意义：一个包可能带十来个工具，平铺会把右边的 token 列挤掉、还会被
+// CSS 截断成 `edit, read, write, …`，反而看不全。所以必须默认折叠、点开才铺开。
+check('the ships column renders a toggle badge rather than a flat join',
+  /shipsToggle/.test(source)
+  // 旧的平铺写法（把数组 join 成一整串直接塞进单元格）必须消失。
+  && !/row\.toolNames\.join\('、'\)/.test(codeOnly));
+check('a collapsed row advertises how many tools there are',
+  /t\('shipsCount', \{ n: names\.length \}\)/.test(source));
+check('expanding renders one chip per tool name',
+  /shipsChip/.test(source) && /names\.map\(/.test(source));
+check('expand state is tracked per row key, not globally',
+  /const \[expanded, setExpanded\] = useState\(\(\) => new Set\(\)\)/.test(source)
+  && /toggleExpanded/.test(source) && /expanded\.has\(key\)/.test(source));
+check('clicking the toggle cannot also tick the row checkbox',
+  // 整行是 <label>，点它会连带切换 checkbox。两个方法都必要：
+  //   preventDefault 阻止 label 转发点击，stopPropagation 阻止冒泡。
+  /event\.preventDefault\(\);\s*\n\s*event\.stopPropagation\(\);/.test(source));
+check('the toggle is reachable by keyboard and states its expandedness',
+  /role: 'button'/.test(source) && /'aria-expanded': open/.test(source) && /tabIndex: 0/.test(source));
+check('the en dictionary carries the same collapse keys as zh',
+  /shipsCount: '\{n\}'/.test(source)
+  && /shipsExpand: 'Expand'/.test(source)
+  && /shipsShow: 'Show the \{n\} tools'/.test(source)
+  && /shipsNone: 'not listed'/.test(source));
+
+console.log('\n== the description column says what a thing is for ==');
+// 用户原话：「你为啥要注释成"这个包没有标注工具清单"，你没法详细注释它的功能吗？」
+// 这一列必须显示这个工具/包**是干嘛的**，而不是一个状态词。
+check('every row renders a description cell, not just a name and a token count',
+  /const renderDesc = \(row\) =>/.test(source)
+  // 两张表都要调用它。
+  && (source.match(/renderDesc\(row\)/g) ?? []).length >= 2);
+check('the description comes from the entry\u2019s own words, with a neutral fallback',
+  // 优先 summary（中文 README 的说明），退回 description，都没有才用占位语。
+  /row\.summary \?\? row\.description/.test(source)
+  && /descMissing: '没有提供说明文字'/.test(source));
+check('the placeholder for a missing description is NOT the tool-list placeholder',
+  // 「没有标注工具清单」说的是**另外一列**（带的工具）。两个占位语必须分开，
+  // 否则「说明」列显示的是工具清单的状态 —— 正是用户指出的问题。
+  /descMissing:/.test(source) && /shipsNone:/.test(source)
+  && !/shipsNone: '这个包没有标注工具清单'/.test(source));
+check('the two columns are separate headings so neither can masquerade as the other',
+  /colDesc:/.test(source) && /colShips:/.test(source)
+  && /t\('colDesc'\)/.test(source) && /t\('colShips'\)/.test(source));
+check('rows carry a stable-width tools column so the description keeps its room',
+  /rowShipsHead:/.test(source) && /rowShips:/.test(source));
+
 console.log(`\n== ${pass} passed, ${fail} failed ==\n`);
 process.exit(fail === 0 ? 0 : 1);

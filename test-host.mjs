@@ -190,6 +190,102 @@ check('at least one package resolved tool names', withTools.length > 0, `${withT
 console.log(`  info  catalogue: ${snapshotBody.availablePackages.length} packages, ` +
   `${snapshotBody.availablePackages.reduce((n, p) => n + p.toolNames.length, 0)} tool names`);
 
+console.log('\n== catalogue tool names are real tool names, not parameter noise ==');
+// 这组断言的由来：用户截图反馈「可挂」区每个包后面跟着一串
+//   run_in_background, job_output, job_kill, sandbox_permissions, justification…
+// —— 全是**参数名**。根因是本仓库的包 README **没有 Summary 章节**，
+// 于是老实现每次都掉进「整篇 README 反引号词」兜底分支，把参数名一并收了。
+// 现在改为从包的 description 里提取，下面把这条契约钉死。
+const allNames = snapshotBody.availablePackages.flatMap((p) => p.toolNames);
+// 一批**已知是参数名或配置字段**的词 —— 它们一旦出现在工具清单里就是回归。
+const PARAM_NOISE = [
+  'timeout', 'selected', 'custom', 'kind', 'offset', 'limit', 'file_path',
+  'content', 'old_string', 'new_string', 'run_in_background', 'sandbox_permissions',
+  'justification', 'wait', 'mode', 'header', 'options', 'label', 'description',
+  'workdir', 'command', 'append', 'signal',
+];
+const leaked = allNames.filter((n) => PARAM_NOISE.includes(n));
+check('no parameter names were mistaken for tool names',
+  leaked.length === 0, leaked.join(', '));
+check('tool names are snake_case identifiers',
+  allNames.every((n) => /^[a-z][a-z0-9_]*$/.test(n)),
+  allNames.filter((n) => !/^[a-z][a-z0-9_]*$/.test(n)).join(', '));
+// 逐包核对几个**已知事实**（值来自包自己的描述，不是猜的）：
+//   dsh-tool-fs        → "filesystem tools (read, write, edit)"
+//   dsh-tool-fs-search → "discovery tools (glob, grep) backed by … ripgrep"
+//   dsh-tool-jobs      → "job control tools (job_output, job_list, job_kill)"
+//   dsh-tool-web       → "web tools (web_search, web_fetch)"
+const EXPECTED = new Map([
+  // 值来自包自己的说明（中文 README frontmatter 优先，英文 description 兜底）。
+  // dsh-tool-fs 的 read_image 只在中文说明里出现（英文 description 里没有），
+  // 所以这条同时验证了「中文来源确实被用上了」。
+  ['@deepseek-ai/dsh-tool-fs', ['edit', 'read', 'read_image', 'write']],
+  ['@deepseek-ai/dsh-tool-fs-search', ['glob', 'grep']],
+  ['@deepseek-ai/dsh-tool-jobs', ['job_kill', 'job_list', 'job_output']],
+  ['@deepseek-ai/dsh-tool-web', ['web_fetch', 'web_search']],
+]);
+for (const [pkg, want] of EXPECTED) {
+  const row = snapshotBody.availablePackages.find((p) => p.package === pkg)
+    ?? snapshotBody.availablePackages.find((p) => p.package === pkg) // 同上（可挂表按包名）
+    ?? { toolNames: [] };
+  // 表里可能因为「已挂」被过滤掉，那就从原始目录里找（mounted 行也带包名）。
+  const fromMounted = snapshotBody.mounted.find((m) => m.package === pkg);
+  const got = row.toolNames.length > 0 ? row.toolNames : (fromMounted?.toolNames ?? []);
+  check(`${pkg.replace('@deepseek-ai/', '')} lists exactly ${JSON.stringify(want)}`,
+    JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
+}
+// 括号里的包路径不能被当成工具名（`(@vscode/ripgrep)` 曾经混进来过）。
+check('a parenthesised package path is not treated as a tool name',
+  !allNames.includes('ripgrep') && !allNames.some((n) => n.includes('@')),
+  allNames.filter((n) => n.includes('@')).join(', '));
+check('a package with no stated tool list reports an empty array, not noise',
+  snapshotBody.availablePackages.some((p) => Array.isArray(p.toolNames)));
+
+console.log('\n== every catalogue row carries a human-readable summary ==');
+// 用户原话：「你为啥要注释成"这个包没有标注工具清单"，你没法详细注释它的功能吗？」
+// 于是宿主半除了工具名，还要给出**这句说明**，界面才有话可说。
+// 来源优先中文 README 的 frontmatter（人写的、给人看的），
+// 没有才退回 package.json 的英文 description。
+const summarised = snapshotBody.availablePackages.filter(
+  (p) => typeof p.summary === 'string' && p.summary.trim() !== '',
+);
+check('the summary field is present on every catalogue row',
+  snapshotBody.availablePackages.every((p) => 'summary' in p));
+check('nearly every package has a real summary, not an empty string',
+  summarised.length >= snapshotBody.availablePackages.length - 1,
+  `${summarised.length} of ${snapshotBody.availablePackages.length}`);
+// 中文说明必须真的是中文 —— 否则说明列显示的还是很长的英文实现描述。
+const chineseSummaries = summarised.filter((p) => /[\u4e00-\u9fff]/.test(p.summary));
+check('most summaries are in Chinese (the README.zh frontmatter is preferred)',
+  chineseSummaries.length >= summarised.length * 0.7,
+  `${chineseSummaries.length} of ${summarised.length} are Chinese`);
+// 中文说明里不能残留面向维护者的套话尾巴 —— 那是给维护者看的，不是给用户看的。
+// ⚠️ 只做**软断言**：正则抠自然语言不可能 100%。实测有 3 个包的句式过于特殊
+// （`dsh-tool-goal` 的套话嵌在句中间、`dsh-tool-subagent-control` 的套话在句首、
+// `dsh-tool-subagent` 的尾巴与正文同句），切不干净。
+// 与其为每个个例再叠正则（每叠一层就多一分误伤风险），不如接受少量残留：
+// 留着一句啰嗦的套话，远好过把整句说明切没。安全网（looksMangled）会挡住
+// 切坏的情况，所以这里只要求「大多数是干净的」。
+const withBoilerplate = chineseSummaries.filter((p) => /维护者|使用者/.test(p.summary));
+check('the maintainer-facing boilerplate is stripped from most summaries',
+  withBoilerplate.length <= 3,
+  `${withBoilerplate.length} of ${chineseSummaries.length}: `
+    + withBoilerplate.map((p) => p.package.replace('@deepseek-ai/', '')).join(', '));
+// 更重要的：**没有任何一条说明被切坏**（剩半句残话比留套话糟得多）。
+check('no summary was mangled into a fragment by the boilerplate stripper',
+  chineseSummaries.every((p) => p.summary.length >= 6
+    && !/^[的了与和及或以及、，,。；;：:]/u.test(p.summary)),
+  chineseSummaries.filter((p) => p.summary.length < 6
+    || /^[的了与和及或以及、，,。；;：:]/u.test(p.summary))
+    .map((p) => `${p.package}: ${p.summary}`).join(' | '));
+// 说明不能是 "Model-facing … over the ctx.x seam" 这种写给实现者的话。
+check('summaries are not raw implementation notes',
+  chineseSummaries.some((p) => !/^Model-facing/.test(p.summary)));
+check('the summary is distinct from the raw English description',
+  snapshotBody.availablePackages.some(
+    (p) => typeof p.summary === 'string' && p.summary !== p.description,
+  ));
+
 console.log('\n== export route: mounted tool names resolve to packages ==');
 // Pick a package that has known tool names, then feed its TOOL names in.
 const target = withTools[0];
