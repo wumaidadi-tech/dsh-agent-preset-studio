@@ -1,0 +1,37 @@
+{
+  "name": "@local/dsh-agent-preset-studio",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent preset studio: inspect every mounted tool, edit the system prompt, and save the result as an installable preset bundle. · Agent 预设工作室：查看全部工具、编辑系统提示词、存成可安装的预设包。",
+  "icon": "./icon.svg",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "icon.svg",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "meta": {
+    "title": "Agent 预设工作室",
+    "description": "查看全部已挂/可挂工具、编辑系统提示词、存成可安装的预设包。"
+  }
+}

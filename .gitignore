@@ -1,0 +1,24 @@
+# 依赖 —— 本插件零运行时依赖，但开发时可能临时装过东西
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# 导出的预设包：这是插件的产出物，不是源码
+generated/
+
+# 临时调试脚本（开发过程中用来验证行为的，一律以 _ 开头）
+_*
+
+# 日志与截图
+*.log
+*.tmp
+*.png
+*.jpg
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
