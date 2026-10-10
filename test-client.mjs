@@ -328,9 +328,15 @@ console.log('\n== the mounted table does not ask a single tool what tools it shi
 // 但真正的问题是语义：已挂表**一行就是一个工具**，
 // 「这一个工具带哪些工具」本身就不成立。所以那一列必须从这张表移除。
 check('the mounted table has no ships column at all',
-  // 已挂表的表头只有 工具名/归属包/说明/token 四个 span，不含 colShips。
-  /h\('span', \{ style: S\.rowShipsHead \}, t\('colOwner'\)\)/.test(source)
-  && !/h\('span', \{ style: S\.rowShipsHead \}, t\('colShips'\)\)[\s\S]{0,400}?renderDesc/.test(source));
+  // 判据：已挂表的**表头块**里不出现 colShips。
+  // 做法是截出「已挂表头」那一段（从 toolsMounted 到 sectionBody），断言它没有 colShips。
+  (() => {
+    const start = source.indexOf("t('toolsMounted')");
+    const end = source.indexOf('filteredMounted.length === 0');
+    if (start < 0 || end < 0 || end < start) return false;
+    const head = source.slice(start, end);
+    return !/colShips/.test(head);
+  })());
 check('the mounted row renders no ships cell',
   // 已挂行的渲染里不能再出现 renderShips 调用。
   // 判据：renderShips 的**调用**只应出现在可挂表那一块。
@@ -338,10 +344,18 @@ check('the mounted row renders no ships cell',
 check('the mounted row names the tool in the first column, not the package',
   // 第一列表头写的是「工具 / 包」，已挂行是工具，所以第一列应显示 row.name。
   /const shown = row\.name \?\? key;/.test(source));
-check('the mounted row shows the owning package in its own column',
-  /const ownerLabel = ownerMissing/.test(source)
-  && /t\('colOwner'\)/.test(source)
-  && /colOwner: '归属包'/.test(source));
+check('the mounted table does not spend a column on the owning package',
+  // 用户原话：「归属包删了不写了」。
+  // 包名对使用者没有决策价值（他关心的是"这个工具干什么、多贵"），
+  // 却会占掉说明列一大截宽度。所以这一列必须消失。
+  !/t\('colOwner'\)/.test(codeOnly)
+  && !/colOwner:/.test(codeOnly)
+  && !/const ownerLabel = ownerMissing/.test(codeOnly));
+check('the owning package survives as a tooltip on the tool name',
+  // 列删了，但信息没丢 —— 它挪进了名称列的 title 悬浮提示。
+  // ⚠️ 这里不能逐行找：`title: ownerMissing` 和 `${row.package}` 分在两行上
+  // （三元表达式跨行了），必须用跨行匹配。
+  /title:\s*ownerMissing[\s\S]{0,160}?row\.package/.test(codeOnly));
 
 console.log('\n== an English description gets a Chinese context tag ==');
 // 用户原话：「中英文怎么混了」。已挂表的说明来自工具自己的 description，
