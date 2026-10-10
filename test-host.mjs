@@ -223,6 +223,14 @@ const EXPECTED = new Map([
   ['@deepseek-ai/dsh-tool-fs-search', ['glob', 'grep']],
   ['@deepseek-ai/dsh-tool-jobs', ['job_kill', 'job_list', 'job_output']],
   ['@deepseek-ai/dsh-tool-web', ['web_fetch', 'web_search']],
+  // ⚠️ 这一条是「来源 5」的守门断言，最容易再退化，必须钉死。
+  // dsh-mcp-resources 全身上下没有一处「结构化」的工具名：
+  //   · 包名不匹配 dsh-tool-* / dsh-skills-* → 来源 4 的包名反推对它无效
+  //   · 英文 description 只描述功能（"Scoped MCP resource discovery…"）
+  //   · 中文 frontmatter 说明也只描述功能，一个工具名都没写
+  // 三个工具名**只出现在中文 README 的正文自然语言里**，且都被反引号包着。
+  // 一旦有人「优化」掉来源 5，这里立刻变红。
+  ['@deepseek-ai/dsh-mcp-resources', ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource']],
 ]);
 for (const [pkg, want] of EXPECTED) {
   const row = snapshotBody.availablePackages.find((p) => p.package === pkg)
@@ -240,6 +248,16 @@ check('a parenthesised package path is not treated as a tool name',
   allNames.filter((n) => n.includes('@')).join(', '));
 check('a package with no stated tool list reports an empty array, not noise',
   snapshotBody.availablePackages.some((p) => Array.isArray(p.toolNames)));
+// ⚠️ 用户截图里看到的「未标注」，直接来源就是某个包的 toolNames 是空数组 ——
+// 界面在那种情况下只能显示占位语。现在 22 个包**全都**能报出工具名，
+// 所以这条改成硬断言：不允许再有任何包报空。
+// （历史上只有 dsh-mcp-resources 报空，根因是它的工具名藏在中文 README 正文里，
+//   四条来源都够不着；见 extractToolNames 的来源 5。）
+const emptyLists = snapshotBody.availablePackages
+  .filter((p) => !Array.isArray(p.toolNames) || p.toolNames.length === 0)
+  .map((p) => p.package);
+check('no catalogue package reports an empty tool list any more',
+  emptyLists.length === 0, emptyLists.join(', '));
 
 console.log('\n== every catalogue row carries a human-readable summary ==');
 // 用户原话：「你为啥要注释成"这个包没有标注工具清单"，你没法详细注释它的功能吗？」

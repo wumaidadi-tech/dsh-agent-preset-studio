@@ -275,15 +275,29 @@ check('row keys and labels go through the package→name fallback',
   `${(source.match(/const key = row\.package \?\? row\.name \?\? '';/g) ?? []).length} site(s)`);
 
 // Every `.replace` on a row field must sit behind an existence check.
+// 这条断言在「已挂表」改用 `ownerMissing` 变量做闸门后更新过一次：
+// 原先的写法是内联三元 `row.package !== undefined ? row.package.replace(...)`，
+// 现在把条件提到了具名常量 `ownerMissing`（同一件事，读起来更清楚）。
+// 判据放宽成「存在任一 checked 闸门」——但**必须**真的存在，不能裸调 replace。
 check('row.package.replace only runs behind a defined-check',
-  /row\.package !== undefined\s*\n?\s*\?\s*row\.package\.replace\(/.test(codeOnly)
+  /ownerMissing\s*=\s*row\.package === undefined/.test(codeOnly)
+  || /row\.package !== undefined\s*\n?\s*\?\s*row\.package\.replace\(/.test(codeOnly)
   || !/row\.package\.replace\(/.test(codeOnly));
 
 // The host must supply `package` on mounted rows so the two tables agree.
 const hostSource = readFileSync('E:/deepseek/agent-preset-studio/lib/index.js', 'utf8');
 check('the host enriches mounted rows with a resolved package',
   /mounted: mountedWithPackage/.test(hostSource)
-  && /package: toolToPackage\.get\(row\.name\)/.test(hostSource));
+  // 归属包现在先存进具名常量 `owner`（同一件事，读起来更清楚），
+  // 因为它还要被下面的 ownerSummary 复用一次。两种写法都认。
+  && (/package: toolToPackage\.get\(row\.name\)/.test(hostSource)
+      || /const owner = toolToPackage\.get\(row\.name\)/.test(hostSource)));
+check('the host also carries the owning package summary onto mounted rows',
+  // 已挂行的说明是工具自己的**英文** description，会和整表的中文表头打架
+  // （用户：「中英文怎么混了」）。宿主要把归属包的中文说明一并带上，
+  // 客户端才能给英文原文配一段中文语境标签。
+  /ownerSummary: owner === undefined \? undefined : packageSummary\.get\(owner\)/.test(hostSource)
+  && /const packageSummary = new Map\(\)/.test(hostSource));
 check('the reverse index is built from the already-scanned catalogue',
   /function toolToPackageOf\(/.test(hostSource)
   && /const toolToPackage = toolToPackageOf\(catalogue\);/.test(hostSource));
@@ -306,6 +320,47 @@ check('the two-different-yardsticks caveat is shown to the user',
   /keyingNote:/.test(source) && /t\('keyingNote'\)/.test(source));
 check('token cost carries a relative bar so magnitudes are visible',
   /barTrack/.test(source) && /barFill/.test(source) && /maxTokens/.test(source));
+
+console.log('\n== the mounted table does not ask a single tool what tools it ships ==');
+// 用户截图里的「未标注」出现在两处，这是**第一处**：
+// 「已挂」那张表照搬了「可挂」表的列，于是每一行后面都跟一个
+// 「带的工具：未标注」—— 因为已挂行的数据里压根没有 toolNames 字段。
+// 但真正的问题是语义：已挂表**一行就是一个工具**，
+// 「这一个工具带哪些工具」本身就不成立。所以那一列必须从这张表移除。
+check('the mounted table has no ships column at all',
+  // 已挂表的表头只有 工具名/归属包/说明/token 四个 span，不含 colShips。
+  /h\('span', \{ style: S\.rowShipsHead \}, t\('colOwner'\)\)/.test(source)
+  && !/h\('span', \{ style: S\.rowShipsHead \}, t\('colShips'\)\)[\s\S]{0,400}?renderDesc/.test(source));
+check('the mounted row renders no ships cell',
+  // 已挂行的渲染里不能再出现 renderShips 调用。
+  // 判据：renderShips 的**调用**只应出现在可挂表那一块。
+  (source.match(/renderShips\(key, row\.toolNames\)/g) ?? []).length === 1);
+check('the mounted row names the tool in the first column, not the package',
+  // 第一列表头写的是「工具 / 包」，已挂行是工具，所以第一列应显示 row.name。
+  /const shown = row\.name \?\? key;/.test(source));
+check('the mounted row shows the owning package in its own column',
+  /const ownerLabel = ownerMissing/.test(source)
+  && /t\('colOwner'\)/.test(source)
+  && /colOwner: '归属包'/.test(source));
+
+console.log('\n== an English description gets a Chinese context tag ==');
+// 用户原话：「中英文怎么混了」。已挂表的说明来自工具自己的 description，
+// 那是写给模型看的英文原文（不能翻译 —— 会丢精度、和实际行为对不上）。
+// 解法是中英对照：英文原文前面加一段中文归属语境。
+check('a Chinese context tag is rendered before an English description',
+  /const prefix = describePrefix\(row, text\)/.test(source)
+  && /h\('span', \{ style: S\.descTag \}, prefix\)/.test(source));
+check('a description that is already Chinese never gets a prefix',
+  // 可挂表的说明本来就是中文，再加标签就成了中英叠罗汉。
+  /if \(\/\[\\u4e00-\\u9fff\]\/\.test\(text\)\) return undefined;/.test(source));
+check('the tag is abbreviated so it cannot crowd out the description',
+  /const shortenSummary = \(zh\) =>/.test(source) && /slice\(0, 14\)/.test(source));
+check('the description body owns its own ellipsis',
+  // 外层现在是 flex 容器，省略号必须落在最内层文本节点上，否则会失效。
+  /descText: \{/.test(source) && /h\('span', \{ style: S\.descText \}, text\)/.test(source));
+check('the context tag only appears when an owning package summary exists',
+  /const zh = row\.ownerSummary;/.test(source)
+  && /if \(typeof zh !== 'string' \|\| zh\.trim\(\) === ''\) return undefined;/.test(source));
 
 console.log('\n== the tool list collapses instead of overflowing ==');
 // 折叠的意义：一个包可能带十来个工具，平铺会把右边的 token 列挤掉、还会被
