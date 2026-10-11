@@ -631,6 +631,15 @@ const buildInteractive = (draftPayload) => {
             persona: { prefix: '现有预设的前缀。', suffix: '', complete: true, includeRuntimeContext: false },
             packages: ['@deepseek-ai/dsh-tool-fs'],
           },
+          // ⚠️ 第二条是**故意不同名**的「我的预设」。上面那条与官方 llama-local
+          //    同名，会被 isDuplicatedMine 从「我的预设」组摘掉，于是系统提示词页
+          //    那个下拉里它只剩官方条目、永远走不到 loadExistingPreset ——
+          //    「载入我的预设不动勾选」这条断言就会空转（这正是本次踩到的坑）。
+          {
+            presetId: 'mock-mine-only', topId: 'preset-mine-only', name: '只有我这有的预设', order: 4,
+            persona: { prefix: '第二条现有预设。', suffix: '', complete: false, includeRuntimeContext: true },
+            packages: ['@deepseek-ai/dsh-tool-web'],
+          },
         ],
       };
     } else {
@@ -866,19 +875,28 @@ const clickTab = (tree, id) => {
   await tick();
   tree = app.getTree();
 
-  // —— 载入现有预设：人设四字段 + 工具勾选（包名写进勾选集）一起载入 ——
-  promptSelects[1].props.onChange({ target: { value: 'mock-preset' } });
+  // —— 载入现有预设：只填人设四字段，**不动工具勾选** ——
+  //    这是用户明确要的第 5 条：系统提示词页与工具页彻底解耦。
+  //    用 `mock-mine-only`（不同名，不会被去重摘掉）才能真走到 loadExistingPreset。
+  const selectedBeforeExistingLoad = [...(app.getStore()?.get()?.selected ?? [])].sort().join(',');
+  promptSelects[1].props.onChange({ target: { value: 'mock-mine-only' } });
   await tick();
   tree = app.getTree();
   check('loading an existing preset fills the prefix box',
-    byType(tree, 'textarea')[0]?.props?.value === '现有预设的前缀。',
+    byType(tree, 'textarea')[0]?.props?.value === '第二条现有预设。',
     byType(tree, 'textarea')[0]?.props?.value);
   check('loading an existing preset fills the complete toggle',
-    checkboxesOf(tree)[0]?.props?.checked === true,
+    checkboxesOf(tree)[0]?.props?.checked === false,
     String(checkboxesOf(tree)[0]?.props?.checked));
-  check('loading an existing preset seeds the package selection',
-    app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-fs') === true,
-    `selected=${JSON.stringify([...(app.getStore()?.get()?.selected ?? [])])}`);
+  check('loading an existing preset on the prompt tab leaves the tool ticks untouched',
+    [...(app.getStore()?.get()?.selected ?? [])].sort().join(',') === selectedBeforeExistingLoad,
+    `${[...(app.getStore()?.get()?.selected ?? [])].sort().join(',')} vs ${selectedBeforeExistingLoad}`);
+  check('loading an existing preset on the prompt tab does not tick its own packages',
+    app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-web') !== true,
+    `selected=${[...(app.getStore()?.get()?.selected ?? [])].sort().join(',')}`);
+  // ⚠️ 不在这里「还原」成 mock-preset —— 它与官方 llama-local 同名，已被
+  //    isDuplicatedMine 从「我的预设」组摘掉，选它 onChange 直接早退、改不动任何状态。
+  //    后面导出页的断言靠的是更早的草稿 source，与本段无关。
 
   // —— 导出页：覆盖 / 另存开关，以及载入过现有预设时的灰态解除 ——
   clickTab(tree, 'export');
@@ -888,8 +906,9 @@ const clickTab = (tree, id) => {
   check('the export tab offers both modes', radios.length === 2, `${radios.length}`);
   check('overwrite is enabled once an existing preset is loaded',
     radios[1]?.props?.disabled !== true, String(radios[1]?.props?.disabled));
+  // 导出表单预填的是**最后一次载入的那个预设**的 id —— 上面载入的是 mock-mine-only。
   check('the export form is pre-filled with the edited preset id',
-    byProp(tree, (p) => p.placeholder === 'my-mode')[0]?.props?.value === 'mock-preset',
+    byProp(tree, (p) => p.placeholder === 'my-mode')[0]?.props?.value === 'mock-mine-only',
     byProp(tree, (p) => p.placeholder === 'my-mode')[0]?.props?.value);
   radios[0].props.onChange();
   await tick();
