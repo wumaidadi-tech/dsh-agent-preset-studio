@@ -6,7 +6,7 @@
  * Run: node test-host.mjs
  */
 
-import { existsSync, readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -377,7 +377,100 @@ check('bare export has zero rows', bareBody?.rowCount === 0, String(bareBody?.ro
 check('empty plugins list is written inline', barePatch.includes('        plugins: []'), barePatch.split('\n').slice(-6).join(' | '));
 check('no persona row is emitted', !barePatch.includes('dsh-persona'));
 
-console.log('\n== method guards ==');
+console.log('\n== preset ids that silently degrade are rejected ==');
+// 真实产物里出过一个 id 叫 `1`、name 为空的预设 —— 界面上完全认不出是什么。
+// 根因是用户填的中文 id「预设-1」被正则剥成了纯数字 `1`，全程没有任何提示。
+// 这一节把两条拒绝规则钉死：剥完为空要拒绝，剥完只剩数字也要拒绝。
+// 顺带把源代码文本读进来（后面几节要对着实现做断言）。
+const hostSource = readFileSync(join(HERE, 'lib', 'index.js'), 'utf8');
+for (const [raw, why] of [
+  ['预设-1', '中文被剥掉后只剩数字'],
+  ['12345', '本来就是纯数字'],
+  ['预设', '中文被剥光'],
+  ['我的 预设', '中文被剥光'],
+]) {
+  const badRoot = mkdtempSync(join(tmpdir(), 'aps-badid-'));
+  const badBody = jsonOf(await callRoute(exportRoute, {
+    method: 'POST',
+    body: JSON.stringify({ presetId: raw, persona: 'x', packages: [], outputRoot: badRoot }),
+  }));
+  check(`rejects the id ${JSON.stringify(raw)} (${why})`, badBody?.ok === false,
+    JSON.stringify(badBody).slice(0, 200));
+  check(`the rejection for ${JSON.stringify(raw)} explains what to do instead`,
+    typeof badBody?.error === 'string' && /英文|字母/.test(badBody.error), badBody?.error);
+  check(`nothing was written for ${JSON.stringify(raw)}`,
+    readdirSync(badRoot).length === 0, readdirSync(badRoot).join(', '));
+}
+// 反过来：中文 id 里带拉丁字母时，字母部分应当保留下来。
+for (const [raw, want] of [['中文English', 'english'], ['我的 preset-2', 'preset-2']]) {
+  const okRoot = mkdtempSync(join(tmpdir(), 'aps-okid-'));
+  const okBody = jsonOf(await callRoute(exportRoute, {
+    method: 'POST',
+    body: JSON.stringify({ presetId: raw, persona: 'x', packages: [], outputRoot: okRoot }),
+  }));
+  check(`keeps the latin part of ${JSON.stringify(raw)}`, okBody?.presetId === want,
+    `${okBody?.presetId} (wanted ${want})`);
+}
+
+console.log('\n== a persona package must not be declared twice ==');
+// 界面上的「已挂」表按**工具名**勾选，而 dsh-persona 自己也暴露了一个同名工具。
+// 它被反查成 @deepseek-ai/dsh-persona 后，会和上面的人设行撞在一起 ——
+// 产物里出现两行同名行，第二行没有 config，把第一行的人设整个盖成空壳。
+const dupRoot = mkdtempSync(join(tmpdir(), 'aps-dup-'));
+await callRoute(exportRoute, {
+  method: 'POST',
+  body: JSON.stringify({
+    presetId: 'dupe-check',
+    personaFields: { prefix: '人设正文必须活下来。', suffix: '', complete: false, includeRuntimeContext: true },
+    // 这个 key 会反查成 @deepseek-ai/dsh-persona
+    packages: ['dsh-persona', '@deepseek-ai/dsh-tool-fs'],
+    outputRoot: dupRoot,
+  }),
+});
+const dupPatch = readFileSync(join(dupRoot, 'dupe-check', 'cordis.patch.yml'), 'utf8');
+check('the persona package is declared exactly once',
+  (dupPatch.match(/name: '@deepseek-ai\/dsh-persona'/g) ?? []).length === 1,
+  `${(dupPatch.match(/name: '@deepseek-ai\/dsh-persona'/g) ?? []).length} occurrences\n${dupPatch}`);
+check('the surviving persona row keeps the body', dupPatch.includes('人设正文必须活下来。'));
+check('no empty persona shell row was appended',
+  !/name: '@deepseek-ai\/dsh-persona'\s*\n\s*(?:- id|$)/m.test(dupPatch));
+check('the other ticked package is still there', dupPatch.includes("name: '@deepseek-ai/dsh-tool-fs'"));
+// prefix 为空时人设行本就不写，那么勾到这个包应当正常落成一行工具行。
+const bareDupRoot = mkdtempSync(join(tmpdir(), 'aps-dup2-'));
+await callRoute(exportRoute, {
+  method: 'POST',
+  body: JSON.stringify({
+    presetId: 'dupe-bare',
+    personaFields: { prefix: '', suffix: '', complete: false, includeRuntimeContext: true },
+    packages: ['@deepseek-ai/dsh-persona'],
+    outputRoot: bareDupRoot,
+  }),
+});
+const bareDupPatch = readFileSync(join(bareDupRoot, 'dupe-bare', 'cordis.patch.yml'), 'utf8');
+check('with no persona body the package still lands as a plain tool row',
+  (bareDupPatch.match(/name: '@deepseek-ai\/dsh-persona'/g) ?? []).length === 1,
+  bareDupPatch.split('\n').slice(-6).join(' | '));
+
+console.log('\n== the export verifies the bundle actually got registered ==');
+// 真实事故：pnpm 的供应链策略拦下了一个**无关的**包，install 整体失败，
+// installBundle 只建了 node_modules 软链却没写 dsh.profile.bundles，
+// 界面却报成功 —— DSH 重启后完全看不到预设。
+// 这一节证明：装完必须回读 bundles 名单，没进名单就报「没装成」。
+check('the host reads the profile manifest after installing',
+  /bundleIsRegistered\(/.test(hostSource) && /bundleIsRegistered\(packageName, profileDirOf\(ctx\)\)/.test(hostSource));
+check('a bundle missing from the manifest is reported as not installed',
+  /registered: false/.test(hostSource) && /installed: false,\s*\n\s*registered/.test(hostSource));
+check('the warning names the manifest field the reader actually looks at',
+  /dsh\.profile\.bundles/.test(hostSource),
+  'the message must tell the user which field is missing');
+check('an unreadable manifest yields undefined, not a false alarm',
+  /function bundleIsRegistered[\s\S]{0,400}?return undefined;[\s\S]{0,200}?\}/.test(hostSource));
+// persona.md 必须以归一化后的人设为准 —— 新版界面只传 personaFields，
+// 照旧读 options.persona 会让这个人设文件整个漏写。
+check('persona.md is written from the normalized persona fields, not the legacy string',
+  /const persona = spec\.personaFields\?\.prefix \?\? '';/.test(hostSource));
+
+
 const badMethod = await callRoute(snapshotRoute, { method: 'DELETE' });
 check('snapshot rejects DELETE with 405', badMethod.status === 405, String(badMethod.status));
 check('rejected requests still end their response', badMethod.settled === true);
@@ -982,7 +1075,6 @@ check('the original draft bytes are restored for later tests',
 // turned the failure into "no packages found" — an empty panel section with
 // no error anywhere. Assert both halves of the fix.
 console.log('\n== archive index hygiene ==');
-const hostSource = readFileSync(join(HERE, 'lib', 'index.js'), 'utf8');
 check('the index closes its header descriptor', /finally\s*\{[\s\S]{0,200}?closeSync\(fd\)/.test(hostSource));
 check('the index holds no long-lived descriptor',
   !/\breturn\s*\{[^}]*\bfd\b[^}]*\}/.test(hostSource)

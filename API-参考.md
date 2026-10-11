@@ -1,8 +1,8 @@
 # DSH 客户端 API 参考（从 app.asar 实读，非推断）
 
-来源：`E:/deepseek/resources/app.asar` → `dsh/node_modules/@deepseek-ai/*/lib/client.js`
+来源：`<DSH 安装目录>/resources/app.asar`（换成你机器上实际的 DeepSeek Harness 安装目录）→ `dsh/node_modules/@deepseek-ai/*/lib/client.js`
 
-提取工具：`C:\Users\angel\AppData\Local\Temp\dsh-asar2\asar.js`（模式 list / cat / dump；
+提取工具：本地准备一份 `asar.js` 解包脚本（模式 list / cat / dump；
 包路径前缀 `dsh/node_modules/@deepseek-ai/...`，`cat`/`dump` 必须带 `MSYS_NO_PATHCONV=1`）
 
 ---

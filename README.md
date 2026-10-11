@@ -111,7 +111,7 @@
 本机没有独立的 node / pnpm 可执行文件，profile 的 pnpm 要用 Electron 当 Node 跑。
 下面命令里的 `<DSH 根目录>` 换成**你的** DeepSeek Harness 安装目录
 （Windows 默认通常是 `C:/Users/<用户名>/AppData/Local/Programs/` 下的安装位置；
-例子里用的是 `E:/deepseek`）：
+下方示例仅为格式参考，请替换为你机器上的实际路径）：
 
 ```bash
 cd ~/.dsh/profiles/desktop
@@ -119,12 +119,12 @@ ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
   "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add <本插件clone到的目录>
 ```
 
-例（DSH 装在 `E:/deepseek`、插件 clone 到 `E:/deepseek/agent-preset-studio` 时）：
+例（DSH 装在 `<DSH 根目录>`、插件 clone 到 `<插件目录>` 时）：
 
 ```bash
 cd ~/.dsh/profiles/desktop
-ELECTRON_RUN_AS_NODE=1 "E:/deepseek/DeepSeek Harness.exe" \
-  "E:/deepseek/resources/runtime/pnpm/bin/pnpm.cjs" add "E:/deepseek/agent-preset-studio"
+ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
+  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add "<插件目录>"
 ```
 
 然后**手动**往 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 加一行：
@@ -161,7 +161,67 @@ node test-install.mjs   # 安装预检（manifest / 链接 / 双端可加载性�
 
 ---
 
-## 排查入口
+## ⚠️ 导出成功但 DSH 看不到预设？先看这一节
+
+**这不是插件的 bug，是 pnpm 供应链策略的副作用。** 已经踩过一次，写下来免得再踩。
+
+### 症状
+
+导出预设时界面**报成功**、`lib/generated/<id>/` 目录也生成了、`node_modules` 里
+软链也建好了，但**重启 DSH 还是看不到这个预设**，`package.json` 的
+`dsh.profile.bundles` 里也**没有**它。
+
+### 根因
+
+DSH 加载 profile 时**只读 `package.json` 里的 `dsh.profile.bundles` 名单，
+完全不看 `node_modules`**。安装一个 bundle 要做两件事：
+
+1. `pnpm add` 建软链、写 `dependencies`
+2. 把包名 `push` 进 `dsh.profile.bundles`，再原子写回 manifest
+
+而 pnpm 有一道 **`minimumReleaseAge`（供应链策略）**：lockfile 里任何一个包
+「发布时间太新」都会让**整个 `pnpm install` 失败**。这时第 1 步的
+软链可能已经建好，但第 2 步**根本没跑到** —— 于是界面报成功、DSH 却看不见。
+
+真实案例（本机日志 `.plugin-manager/logs/operation-TKSHpi/pnpm.log`）：
+
+```
++ @local/dsh-preset-1 link:E:/deepseek/agent-preset-studio/lib/generated/1
+✗ Lockfile failed supply-chain policy check (219 entries in 2s)
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
+  billion-context@0.1.192 was published at 2026-10-10T15:32:29.720Z,
+  within the minimumReleaseAge cutoff
+```
+
+注意：被判违规的是 **`billion-context`** —— 一个跟导出预设**毫无关系**的包。
+它太新，就足以让整次 install 一起失败。
+
+### 怎么修
+
+到 `~/.dsh/profiles/desktop/` 下按 pnpm 自己的提示走（二选一）：
+
+```bash
+# 方案 A：清掉 lockfile 重新解析
+cd ~/.dsh/profiles/desktop
+ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
+  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" clean --lockfile
+# 然后到「插件」页重试安装，或手动 pnpm install
+
+# 方案 B：放行那一个包（在 profile 的 package.json 里加，不要加到全局）
+#   "pnpm": { "minimumReleaseAgeExclude": ["billion-context"] }
+```
+
+处理完**到「插件」页重新安装一次**那个预设包即可，不用重新导出。
+
+### 插件侧已经做的加固
+
+`generateAndInstall` 在 `installBundle` 返回后会**回读**
+`dsh.profile.bundles` 确认包名真的进去了。没进去就返回
+`installed: false / registered: false` 并附上 pnpm 报告的原因 ——
+**不再因为「没抛错」就误报成功**。所以新版界面遇到这种情况会直接告诉你，
+而不是让你对着一个「成功」提示重启十次。
+
+---
 
 | 路由 | 用途 |
 |---|---|
@@ -216,7 +276,7 @@ handler: (request) => json({ ok: true })                              // ❌ 永
 
 ### 4. ⚠️ Electron 会拦截 `openSync('.../app.asar')`（只在运行时炸）
 
-`fs.openSync('<DSH 安装目录>/resources/app.asar')`（下例用了开发机的路径 `E:/deepseek`）
+`fs.openSync('<DSH 安装目录>/resources/app.asar')`（路径换成你机器上实际的 DSH 安装目录）
 **在纯 Node 里成功（121,348,951 字节），在 Electron 主进程里报 ENOENT。**
 
 原因：Electron patch 过 fs，把路径里出现 `.asar` 的那一段当成**目录**去虚拟文件系统里查，
@@ -274,6 +334,15 @@ generated/            导出的预设包落在默认输出目录下
 - **「从现有预设载入」依赖宿主 `profile-presets` 路由**：它解析 profile 的
   `cordis.patch.yml` 文本。解析失败 / 超时 / patch 文件不存在时，
   下拉会显示原因，但提示词编辑器、工具勾选与导出照常可用。
+- **预设 id 只接受小写拉丁字母、数字和连字符**。中文 / 空格 / 其他符号会被
+  剥掉 —— 剥完为空、或只剩纯数字的，**直接拒绝并说明原因**，不做静默降级。
+  （曾经 `预设-1` 被静默存成 `1`，产出一个名叫 `1`、name 空着的预设，界面上
+  完全认不出来。静默改坏比报错糟得多。）
+- **预设中的 `cordis:group` 分组只能整组保留或整组丢弃**，不支持组内挑选。
+  组里还有任何工具被勾着，整组就会留下。
+- **导出后的安装步骤依赖 pnpm 能跑通**。若 profile 的 lockfile 触发 pnpm
+  供应链策略（`minimumReleaseAge`），整次 install 会失败、`dsh.profile.bundles`
+  不会更新 —— 详见上面那一节。插件只能**如实报告**，改不了 pnpm 策略。
 
 ---
 
