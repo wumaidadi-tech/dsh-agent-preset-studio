@@ -609,7 +609,13 @@ const buildInteractive = (draftPayload) => {
         availablePackages: [
           { package: '@deepseek-ai/dsh-tool-fs', version: '1.0.0', toolNames: ['read', 'write'], anyMounted: true, summary: '文件系统工具' },
         ],
-        presets: [],
+        // ⚠️ roster 不能是空数组 —— 空 roster 会让系统提示词页的合并下拉
+        //    把「我的预设」也当成唯一候选，走不到 loadOfficialPreset 分支，
+        //    于是「载入官方预设不动勾选」这条断言就测了个寂寞。
+        //    给一个真·官方条目，并让「我的预设」mock-preset 与它**同名**
+        //    （name 相同），它就会被去重规则摘掉「我的预设」组，
+        //    下拉里剩下的 llama-local 是纯官方条目。
+        presets: [{ id: 'llama-local', name: 'Mock 预设' }],
         defaultOutputRoot: '/mock/output',
         profileDir: '/mock/profiles/desktop',
         presetError: undefined,
@@ -774,6 +780,91 @@ const clickTab = (tree, id) => {
     byType(tree, 'textarea')[0]?.props?.value);
   check('the edit-source marker survives the round trip too',
     byType(tree, 'select')[1]?.props?.value === 'mock-preset');
+
+  // —— 两个页面的载入下拉必须**互不影响**，且各自的选择要跨切页保留 ——
+  // 回归背景①：下拉的选中值一度各自放在 tab 组件内部（useState），
+  //   切走这个 tab 组件被卸载 → 再切回来显示「未选」，看着就像「被影响了」。
+  //   现在两个值都提到根组件持有并往下传，这节把这条行为锁死。
+  // 回归背景②：用户报「系统提示词的载入会影响工具页」。真凶是 loadOfficialPreset
+  //   顺手写 selected（已删）。这里额外验证：在系统提示词页选**官方预设**时，
+  //   工具勾选必须**一个字节都不动**。
+  // ⚠️ 要选到一个真·官方预设，roster 不能是空的 —— mock 的 snapshot.presets
+  //   给了 llama-local，同时让「我的预设」mock-preset 与它**同名**，
+  //   这样它会被去重规则从「我的预设」组里摘掉（isDuplicatedMine），
+  //   下拉里那个 llama-local 就是纯官方条目，走 loadOfficialPreset 分支。
+  clickTab(tree, 'tools');
+  await tick();
+  tree = app.getTree();
+  const toolsSelect = byType(tree, 'select').at(-1);
+  toolsSelect.props.onChange({ target: { value: 'mock-preset' } });
+  await tick();
+  tree = app.getTree();
+  check('picking a preset on the tools tab updates the tools dropdown',
+    byType(tree, 'select').at(-1)?.props?.value === 'mock-preset',
+    String(byType(tree, 'select').at(-1)?.props?.value));
+  // ⚠️ 基线要在**工具页那次点击之后**取！取早了会拿「点击前的 read」当基准，
+  //    而工具页点击本来就会（按设计）把勾选换成该预设的包 —— 那不是 bug。
+  const selectedBeforePromptPick = [...(app.getStore()?.get()?.selected ?? [])].sort().join(',');
+  check('the tools-tab pick actually seeded the package selection',
+    app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-fs') === true,
+    `selected=${[...(app.getStore()?.get()?.selected ?? [])].sort().join(',')}`);
+
+  // 切到系统提示词页：工具页那个选择**不该**跑到这里来（两个值互相独立）。
+  // ⚠️ 别拿「空字符串」当期望值 —— 这个下拉的 value 是
+  //   presetPick !== '' ? presetPick : (current ?? '')
+  //   即「没手动选过时，显示当前编辑来源」。所以这里看到 mock-preset 是对的
+  //   （草稿的 source.presetId 就是 mock-preset），不是串页。
+  //   真正要验的是：它**不等于**工具页刚选的那个值所造成的人为串扰 ——
+  //   而工具页选的是同一个 mock-preset，两边撞号了没法区分。
+  //   所以改用下拉的 title 精确定位到「系统提示词页那个」（promptLoadTitle），
+  //   并选一个工具页绝不可能出现的值来验独立性。
+  clickTab(tree, 'prompt');
+  await tick();
+  tree = app.getTree();
+  const promptSelect = byType(tree, 'select').find((s) => s.props?.title === 'promptLoadTitle');
+  check('the prompt tab exposes its own preset dropdown (not the tools one)',
+    promptSelect !== undefined && promptSelect.props?.title === 'promptLoadTitle',
+    String(promptSelect?.props?.title));
+  check('the prompt dropdown shows the edit source before any manual pick',
+    promptSelect?.props?.value === 'mock-preset',
+    String(promptSelect?.props?.value));
+
+  // 在系统提示词页选一个**官方**预设（只载人设，绝不碰勾选）。
+  // 用 title 定位下拉，不用下标 —— 下标会随页面结构改动而失准（这次就踩了）。
+  const pickPrompt = (val) => {
+    const s = byType(app.getTree(), 'select').find((n) => n.props?.title === 'promptLoadTitle');
+    s.props.onChange({ target: { value: val } });
+  };
+  pickPrompt('llama-local');
+  await tick();
+  await tick();
+  tree = app.getTree();
+  check('picking an official preset on the prompt tab updates the prompt dropdown',
+    byType(tree, 'select').find((s) => s.props?.title === 'promptLoadTitle')?.props?.value === 'llama-local',
+    String(byType(tree, 'select').find((s) => s.props?.title === 'promptLoadTitle')?.props?.value));
+  check('picking an official preset on the prompt tab leaves the tool ticks untouched',
+    [...(app.getStore()?.get()?.selected ?? [])].sort().join(',') === selectedBeforePromptPick,
+    `${[...(app.getStore()?.get()?.selected ?? [])].sort().join(',')} vs ${selectedBeforePromptPick}`);
+
+  // 再切回工具页：那个选择也得还在（跨切页保留）。
+  clickTab(tree, 'tools');
+  await tick();
+  tree = app.getTree();
+  check('the tools dropdown survives a round trip through the prompt tab',
+    byType(tree, 'select').at(-1)?.props?.value === 'mock-preset',
+    String(byType(tree, 'select').at(-1)?.props?.value));
+  // 切回系统提示词页，那边的选择同样还在（这条才是「提状态到根组件」的核心收益：
+  // 放在 tab 内部时会随组件卸载而丢，切回来就变回未选）。
+  clickTab(tree, 'prompt');
+  await tick();
+  tree = app.getTree();
+  check('the prompt dropdown survives a round trip through the tools tab',
+    byType(tree, 'select').find((s) => s.props?.title === 'promptLoadTitle')?.props?.value === 'llama-local',
+    String(byType(tree, 'select').find((s) => s.props?.title === 'promptLoadTitle')?.props?.value));
+  // 还原到初始态，后面的既有断言按原顺序继续跑。
+  pickPrompt('');
+  await tick();
+  tree = app.getTree();
 
   // —— 载入现有预设：人设四字段 + 工具勾选（包名写进勾选集）一起载入 ——
   promptSelects[1].props.onChange({ target: { value: 'mock-preset' } });
