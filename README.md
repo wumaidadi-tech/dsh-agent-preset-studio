@@ -108,33 +108,30 @@
 
 ## 安装
 
-本机没有独立的 node / pnpm 可执行文件，profile 的 pnpm 要用 Electron 当 Node 跑。
-下面命令里的 `<DSH 根目录>` 换成**你的** DeepSeek Harness 安装目录
-（Windows 默认通常是 `C:/Users/<用户名>/AppData/Local/Programs/` 下的安装位置；
-下方示例仅为格式参考，请替换为你机器上的实际路径）：
+DSH 自带的 pnpm 不是一个独立可执行文件，要用 Electron 当 Node 来跑它。
+下面的 `<DSH 根目录>` 换成**你的** DeepSeek Harness 安装目录
+（Windows 默认通常在 `C:/Users/<用户名>/AppData/Local/Programs/` 下），
+`<profile 名>` 换成你的 profile 名字（常见是 `desktop`）：
 
 ```bash
-cd ~/.dsh/profiles/desktop
+cd ~/.dsh/profiles/<profile 名>
 ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
-  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add <本插件clone到的目录>
+  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add "<本插件 clone 到的目录>"
 ```
 
-例（DSH 装在 `<DSH 根目录>`、插件 clone 到 `<插件目录>` 时）：
-
-```bash
-cd ~/.dsh/profiles/desktop
-ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
-  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add "<插件目录>"
-```
-
-然后**手动**往 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 加一行：
+然后**手动**往该 profile 的 `package.json` 里加两处：
 
 ```json
+// dsh.profile.bundles —— 加一行
 "@local/dsh-agent-preset-studio"
+
+// dependencies —— 加一项（用 link: 指向你的 clone 目录）
+"@local/dsh-agent-preset-studio": "link:<本插件 clone 到的目录>"
 ```
 
-> pnpm 只负责写 `dependencies`；某一个包要不被加载，由 `bundles` 列表决定。
-> 两处都写了才会生效。
+> pnpm 只负责写 `dependencies`；一个包要不要被加载，由 `bundles` 列表决定。
+> 两处都写了才会生效。（本插件的 `installBundle` 路径会自动完成这两步，
+> 这里是手装时的说明。）
 
 **重启 DSH 生效**（新增 bundle 需要重新走一遍加载链）。
 
@@ -156,8 +153,8 @@ node test-install.mjs   # 安装预检（manifest / 链接 / 双端可加载性�
 > catalogue / export 测试节会明确说明并跳过（前面的纯逻辑测试照常完整运行）；
 > `test-install.mjs` 在 profile 里没装本插件时同样自动跳过。
 
-在装了 DSH 的机器上，`test-host.mjs` 同时能告诉你当前识别到多少工具包
-（当前开发机实测：22 包 / 35 个工具名）。
+在装了 DSH 的机器上，`test-host.mjs` 同时会告诉你当前识别到多少工具包
+（数量取决于你装了哪些 bundle / 插件，各人不同）。
 
 ---
 
@@ -183,18 +180,17 @@ DSH 加载 profile 时**只读 `package.json` 里的 `dsh.profile.bundles` 名�
 「发布时间太新」都会让**整个 `pnpm install` 失败**。这时第 1 步的
 软链可能已经建好，但第 2 步**根本没跑到** —— 于是界面报成功、DSH 却看不见。
 
-真实案例（本机日志 `.plugin-manager/logs/operation-TKSHpi/pnpm.log`）：
+日志长这样（`<profile>/.plugin-manager/logs/<本次操作>/pnpm.log`）：
 
 ```
-+ @local/dsh-preset-1 link:E:/deepseek/agent-preset-studio/lib/generated/1
-✗ Lockfile failed supply-chain policy check (219 entries in 2s)
++ @local/dsh-preset-<id> link:/path/to/lib/generated/<id>
+✗ Lockfile failed supply-chain policy check (N entries in 2s)
 [ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
-  billion-context@0.1.192 was published at 2026-10-10T15:32:29.720Z,
-  within the minimumReleaseAge cutoff
+  some-unrelated-package@<版本> was published at <时间>, within the minimumReleaseAge cutoff
 ```
 
-注意：被判违规的是 **`billion-context`** —— 一个跟导出预设**毫无关系**的包。
-它太新，就足以让整次 install 一起失败。
+注意：被判违规的往往是**跟导出预设毫无关系的另一个包**（profile 里装的
+任何东西都可能）。它太新，就足以让整次 install 一起失败。
 
 ### 怎么修
 
@@ -203,24 +199,25 @@ DSH 加载 profile 时**只读 `package.json` 里的 `dsh.profile.bundles` 名�
 
 ```
 [ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
-  billion-context@0.1.192 was published at 2026-10-10T15:32:29.720Z,
-  within the minimumReleaseAge cutoff (2026-10-10T11:35:37.177Z)
+  some-unrelated-package@<版本> was published at <T+24h 内的某个时刻>,
+  within the minimumReleaseAge cutoff (<当前时间 - 24h>)
 ```
 
->`cutoff` 就是「当前时间减 24 小时」。等 `published at` 早于新的 cutoff，
->这一条就不再违规。上例里 10-10 15:32Z 发的包，到 **10-11 15:32Z** 自动放行。
+> `cutoff` 就是「当前时间减 24 小时」。等 `published at` 早于新的 cutoff，
+> 这一条就不再违规 —— 被点名的包满 24 小时后自动放行。
 
-等不及的话，到 `~/.dsh/profiles/desktop/` 下按 pnpm 自己的提示走（二选一）：
+等不及的话，到你的 profile 目录下按 pnpm 自己的提示走（二选一）：
 
 ```bash
 # 方案 A：清掉 lockfile 重新解析
-cd ~/.dsh/profiles/desktop
+cd <你的 profile 目录>          # 如 ~/.dsh/profiles/<名字>
 ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
   "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" clean --lockfile
-# 然后到「插件」页重试安装，或手动 pnpm install
+# 然后到「插件」页重试安装
 
-# 方案 B：放行那一个包（在 profile 的 package.json 里加，不要加到全局）
-#   "pnpm": { "minimumReleaseAgeExclude": ["billion-context"] }
+# 方案 B：放行被点名的那一个包
+# 在 profile 的 package.json 里加（不要加到全局）：
+#   "pnpm": { "minimumReleaseAgeExclude": ["<被点名的包名>"] }
 ```
 
 处理完**到「插件」页重新安装一次**那个预设包即可，不用重新导出。
@@ -237,6 +234,8 @@ ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
 而不是让你对着一个「成功」提示重启十次。
 
 ---
+
+## 排查入口
 
 | 路由 | 用途 |
 |---|---|
@@ -380,8 +379,8 @@ generated/            导出的预设包落在默认输出目录下
 ### AI 做了什么
 
 架构设计与全部实现、DSH 插件 API 的逆向（读 `app.asar` 提取真实契约）、
-296 条断言的三套测试、bug 根因定位（Electron asar 拦截、文件描述符泄漏、
-路由 `node:http` 契约）、文档撰写。
+359 条断言的三套测试、bug 根因定位（Electron asar 拦截、文件描述符泄漏、
+路由 `node:http` 契约、pnpm 供应链策略中断安装）、文档撰写。
 
 ### 免责声明
 
