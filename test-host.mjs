@@ -6,7 +6,7 @@
  * Run: node test-host.mjs
  */
 
-import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -102,14 +102,16 @@ function jsonOf(result) {
 console.log('\n== route registration ==');
 const ctx = fakeCtx();
 apply(ctx);
-check('registers exactly 5 routes', ctx.routes.length === 5, String(ctx.routes.length));
+check('registers exactly 7 routes', ctx.routes.length === 7, String(ctx.routes.length));
 const paths = ctx.routes.map((r) => r.path).sort();
-check('routes are ping/diagnostics/snapshot/preset/export',
+check('routes are ping/diagnostics/snapshot/preset/profile-presets/draft/export',
   JSON.stringify(paths) === JSON.stringify([
     '/api/agent-preset-studio/diagnostics',
+    '/api/agent-preset-studio/draft',
     '/api/agent-preset-studio/export',
     '/api/agent-preset-studio/ping',
     '/api/agent-preset-studio/preset',
+    '/api/agent-preset-studio/profile-presets',
     '/api/agent-preset-studio/snapshot',
   ].sort()), JSON.stringify(paths));
 check('all routes are exact kind', ctx.routes.every((r) => r.kind === 'exact'));
@@ -483,6 +485,496 @@ check('the reverse index resolves real owners from the install catalogue',
   `resolved ${resolvedPackages.length} of ${toolsBody.mounted.length}; catalogue=${toolsBody.availablePackages.length}`);
 check('the enrichment preserves the original tool name',
   toolsBody.mounted.every((r) => typeof r.name === 'string' && r.name !== ''));
+
+// --- persona has four config keys, not one -----------------------------
+// dsh-persona's implementation reads exactly four: prefix (required), suffix,
+// complete, includeRuntimeContext. The studio shipped only `prefix` and
+// *hardcoded* the other two, which meant `includeRuntimeContext: false` —
+// suppressing every context contribution in that scope — was not the user's
+// choice to make. Lock the full surface down.
+console.log('\n== persona renders all four config keys ==');
+const fourRoot = mkdtempSync(join(tmpdir(), 'aps-persona-'));
+const fourResponse = await callRoute(exportRoute, {
+  method: 'POST',
+  body: JSON.stringify({
+    presetId: 'four-fields',
+    personaFields: {
+      prefix: 'You are four-fields.',
+      suffix: 'Your working directory is {{cwd}}.',
+      complete: false,
+      includeRuntimeContext: true,
+    },
+    packages: [],
+    outputRoot: fourRoot,
+  }),
+});
+const fourPatch = readFileSync(join(fourRoot, 'four-fields', 'cordis.patch.yml'), 'utf8');
+check('a personaFields export succeeds', jsonOf(fourResponse)?.ok === true);
+check('the suffix is written when given', fourPatch.includes('              suffix: |-'));
+check('the suffix body survives', fourPatch.includes('Your working directory is {{cwd}}.'));
+// complete:false 是 dsh-persona 的**默认值**，所以不写出来 —— 写出来等于噪音。
+check('complete:false is omitted (it is the default)', !fourPatch.includes('complete'));
+check('includeRuntimeContext:true is omitted (it is the default)',
+  !fourPatch.includes('includeRuntimeContext'));
+
+const explicitRoot = mkdtempSync(join(tmpdir(), 'aps-persona2-'));
+await callRoute(exportRoute, {
+  method: 'POST',
+  body: JSON.stringify({
+    presetId: 'explicit-fields',
+    personaFields: { prefix: 'x', complete: true, includeRuntimeContext: false },
+    packages: [],
+    outputRoot: explicitRoot,
+  }),
+});
+const explicitPatch = readFileSync(join(explicitRoot, 'explicit-fields', 'cordis.patch.yml'), 'utf8');
+check('complete:true is written', explicitPatch.includes('              complete: true'));
+check('includeRuntimeContext:false is written',
+  explicitPatch.includes('              includeRuntimeContext: false'));
+check('an empty suffix writes no suffix key', !explicitPatch.includes('suffix'));
+
+// 老调用方（只传 persona 字符串）必须保持**原样行为**，否则升级即改坏已有流程。
+const legacyRoot = mkdtempSync(join(tmpdir(), 'aps-legacy-'));
+await callRoute(exportRoute, {
+  method: 'POST',
+  body: JSON.stringify({ presetId: 'legacy', persona: 'old body', packages: [], outputRoot: legacyRoot }),
+});
+const legacyPatch = readFileSync(join(legacyRoot, 'legacy', 'cordis.patch.yml'), 'utf8');
+check('the legacy persona string still lands as prefix', legacyPatch.includes('                old body'));
+check('the legacy path keeps complete:true (the old hardcoded behaviour)',
+  legacyPatch.includes('              complete: true'));
+check('the legacy path keeps includeRuntimeContext:false',
+  legacyPatch.includes('              includeRuntimeContext: false'));
+
+// --- editing an existing preset ----------------------------------------
+console.log('\n== profile-presets + text-level overwrite ==');
+// ⚠️ 用**临时 profile 目录**，绝不动用户真的那份 cordis.patch.yml。
+const fakeProfile = mkdtempSync(join(tmpdir(), 'aps-profile-'));
+const PRESET_PATCH = [
+  '# 手写注释：这行必须活下来。',
+  '- id: some-other-plugin',
+  '  name: "@deepseek-ai/dsh-time-context"',
+  '  config:',
+  '    timeZone: Asia/Shanghai',
+  '# 另一个前置注释',
+  '- insert:',
+  '    - id: preset-legacy-one',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: legacy-one',
+  '        name: 老预设',
+  '        description: 一个用来验证解析的老预设。',
+  '        order: 5',
+  '        plugins:',
+  '          - id: persona',
+  "            name: '@deepseek-ai/dsh-persona'",
+  '            config:',
+  '              suffix: Your working directory is {{cwd}}.',
+  '              prefix: You are a coding agent.',
+  "          - id: legacy-one-dsh-tool-fs",
+  "            name: '@deepseek-ai/dsh-tool-fs'",
+  '- insert:',
+  '    - id: preset-second',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: second',
+  '        name: 第二个',
+  '        order: 6',
+  '        plugins: []',
+  '',
+].join('\n');
+const fakePatchPath = join(fakeProfile, 'cordis.patch.yml');
+writeFileSync(fakePatchPath, PRESET_PATCH, 'utf8');
+
+const profileCtx = fakeCtx();
+apply(profileCtx);
+profileCtx.provide('profileContext', { dir: fakeProfile });
+const listResponse = await callRoute(profileCtx.routes.find((r) => r.path.endsWith('/profile-presets')));
+const listBody = jsonOf(listResponse);
+check('profile-presets answers 200', listResponse.status === 200, String(listResponse.status));
+check('profile-presets reports ok', listBody?.ok === true, JSON.stringify(listBody).slice(0, 200));
+check('both presets are found', listBody.presets.length === 2,
+  JSON.stringify(listBody.presets.map((p) => p.presetId)));
+const legacyListed = listBody.presets.find((p) => p.presetId === 'legacy-one');
+check('the top-level row id is reported', legacyListed?.topId === 'preset-legacy-one', legacyListed?.topId);
+check('name/description/order are read',
+  legacyListed?.name === '老预设' && legacyListed?.order === 5,
+  JSON.stringify(legacyListed).slice(0, 200));
+check('the persona prefix is read', legacyListed?.persona?.prefix === 'You are a coding agent.',
+  JSON.stringify(legacyListed?.persona));
+check('the persona suffix is read',
+  legacyListed?.persona?.suffix === 'Your working directory is {{cwd}}.',
+  JSON.stringify(legacyListed?.persona));
+// 这两个键在原文里**没写**，所以必须报 dsh-persona 的默认值，
+// 而不是替用户猜一个 true/false。
+check('a missing complete key reports the default false', legacyListed?.persona?.complete === false);
+check('a missing includeRuntimeContext key reports the default true',
+  legacyListed?.persona?.includeRuntimeContext === true);
+check('the tool package is listed separately from persona',
+  JSON.stringify(legacyListed?.packages) === JSON.stringify(['@deepseek-ai/dsh-tool-fs']),
+  JSON.stringify(legacyListed?.packages));
+check('a preset with plugins: [] reports no packages',
+  JSON.stringify(listBody.presets.find((p) => p.presetId === 'second')?.packages) === '[]');
+
+const overwriteResponse = await callRoute(profileCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({
+    mode: 'overwrite',
+    presetId: 'legacy-one',
+    topId: 'preset-legacy-one',
+    name: '老预设改',
+    description: '被工作室改写过的描述。',
+    order: 5,
+    personaFields: { prefix: 'You are a rewritten coding agent.', suffix: '', complete: true, includeRuntimeContext: false },
+    packages: ['@deepseek-ai/dsh-tool-fs', target.package],
+  }),
+});
+const overwriteBody = jsonOf(overwriteResponse);
+check('overwrite answers 200', overwriteResponse.status === 200, String(overwriteResponse.status));
+check('overwrite reports ok', overwriteBody?.ok === true, JSON.stringify(overwriteBody).slice(0, 300));
+check('overwrite names the backup it took', typeof overwriteBody.backup === 'string' && overwriteBody.backup !== '');
+check('the backup holds the original bytes',
+  existsSync(overwriteBody.backup) && readFileSync(overwriteBody.backup, 'utf8') === PRESET_PATCH);
+const overwritten = readFileSync(fakePatchPath, 'utf8');
+check('the new persona text is in place', overwritten.includes('You are a rewritten coding agent.'));
+check('the new description is in place', overwritten.includes('被工作室改写过的描述。'));
+check('the old persona text is gone', !overwritten.includes('You are a coding agent.'));
+// 铁律①：其余字节必须原样保留。这个 profile 历史上被一次 YAML 往返
+// 写成了 1.3KB 残缺版、14 条声明全丢 —— 那正是整体解析再写回的后果。
+check('the hand-written top comment survives',
+  overwritten.includes('# 手写注释：这行必须活下来。'));
+check('the unrelated plugin entry survives',
+  overwritten.includes('- id: some-other-plugin')
+  && overwritten.includes('    timeZone: Asia/Shanghai'));
+check('the other preset block survives untouched',
+  overwritten.includes('    - id: preset-second') && overwritten.includes('        id: second'));
+check('the leading comment above the other block survives',
+  overwritten.includes('# 另一个前置注释'));
+check('no generated file header was injected mid-profile',
+  !overwritten.includes('# Generated by Agent Preset Studio.'));
+check('the rewritten preset id did not change', overwritten.includes('        id: legacy-one'));
+check('the rewritten preset appears exactly once',
+  (overwritten.match(/- id: preset-legacy-one/g) ?? []).length === 1);
+check('the new tool package was added',
+  overwritten.includes(`name: '${target.package}'`), target.package);
+
+// 铁律③：找不到目标就**拒绝写**，绝不追加（重复 id 会让整条声明加载失败）。
+const beforeReject = readFileSync(fakePatchPath, 'utf8');
+const rejectResponse = await callRoute(profileCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({ mode: 'overwrite', presetId: 'no-such-preset', topId: 'preset-no-such', personaFields: { prefix: 'x' } }),
+});
+const rejectBody = jsonOf(rejectResponse);
+check('overwriting an unknown preset fails', rejectBody?.ok === false, JSON.stringify(rejectBody).slice(0, 200));
+check('the error explains why nothing was appended',
+  typeof rejectBody.error === 'string' && rejectBody.error.includes('没有追加写入')
+  && rejectBody.error.includes('legacy-one'),
+  rejectBody.error);
+check('the patch file is byte-identical after a rejected overwrite',
+  readFileSync(fakePatchPath, 'utf8') === beforeReject);
+check('a rejected overwrite still ends its response', rejectResponse.settled === true);
+
+// 没有 profile 目录时必须明确拒绝，而不是抛异常或静默新建。
+const noProfileCtx = fakeCtx();
+apply(noProfileCtx);
+const noProfileBody = jsonOf(await callRoute(noProfileCtx.routes.find((r) => r.path.endsWith('/profile-presets'))));
+check('profile-presets degrades cleanly with no profile context',
+  noProfileBody?.ok === false && typeof noProfileBody.error === 'string',
+  JSON.stringify(noProfileBody));
+
+// --- the draft is what makes a selection survive a remount -------------
+console.log('\n== draft round-trip ==');
+const draftRoute = profileCtx.routes.find((r) => r.path.endsWith('/draft'));
+const draftBody = {
+  selected: ['read', 'write', 'edit'],
+  personaFields: { prefix: 'draft prefix', suffix: 'draft suffix', complete: false, includeRuntimeContext: true },
+  source: { mode: 'edit', presetId: 'legacy-one', topId: 'preset-legacy-one' },
+};
+const putResponse = await callRoute(draftRoute, { method: 'PUT', body: JSON.stringify(draftBody) });
+const putBody = jsonOf(putResponse);
+check('draft PUT answers 200', putResponse.status === 200, String(putResponse.status));
+check('draft PUT reports ok', putBody?.ok === true, JSON.stringify(putBody).slice(0, 200));
+const getResponse = await callRoute(draftRoute);
+const getBody = jsonOf(getResponse);
+check('draft GET answers 200', getResponse.status === 200, String(getResponse.status));
+check('the selection survives the round trip',
+  JSON.stringify(getBody?.draft?.selected) === JSON.stringify(['read', 'write', 'edit']),
+  JSON.stringify(getBody?.draft?.selected));
+check('all four persona fields survive the round trip',
+  getBody?.draft?.personaFields?.prefix === 'draft prefix'
+  && getBody?.draft?.personaFields?.suffix === 'draft suffix'
+  && getBody?.draft?.personaFields?.complete === false
+  && getBody?.draft?.personaFields?.includeRuntimeContext === true,
+  JSON.stringify(getBody?.draft?.personaFields));
+check('the edit-source marker survives too',
+  getBody?.draft?.source?.presetId === 'legacy-one', JSON.stringify(getBody?.draft?.source));
+check('draft rejects DELETE', (await callRoute(draftRoute, { method: 'DELETE' })).status === 405);
+check('the draft path is reported so the UI can tell the user where it lives',
+  typeof getBody?.path === 'string' && getBody.path !== '', getBody?.path);
+
+// --- 覆盖写必须保住用户手写的东西 --------------------------------------
+// 上面那个 fixture 太干净，掩盖了三个真实缺陷（都是在真 profile 上
+// 用探针抓出来的）：切分永远匹配不上导致 persona 静默丢失、
+// cordis:group 被当成一个包、整块注释被抄两遍/冲掉。
+// 这个 fixture 刻意复刻真文件的形状：行前注释、注释掉的候选行、
+// cordis:group 分组、以及分组里的叶子。
+console.log('\n== overwrite preserves comments, groups and commented-out rows ==');
+const richProfile = mkdtempSync(join(tmpdir(), 'aps-rich-'));
+const RICH_PATCH = [
+  '- insert:',
+  '    - id: preset-rich',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: rich',
+  '        name: 丰富的预设',
+  '        order: 5',
+  '        plugins:',
+  '          # ── 必选：人设 ────────────────────────────────────────────── 约 300 token',
+  '          - id: persona',
+  "            name: '@deepseek-ai/dsh-persona'",
+  '            config:',
+  '              prefix: |-',
+  '                旧人设。',
+  '          - id: tool-fs',
+  "            name: '@deepseek-ai/dsh-tool-fs'",
+  '          # ── 默认不挂：想要再取消注释 ──',
+  '          # - id: tool-todo',
+  "          #   name: '@deepseek-ai/dsh-tool-todo'",
+  '          # ── 长会话压缩 ── 阈值 111,616',
+  '          - id: compaction',
+  '            name: cordis:group',
+  '            group: true',
+  '            isolate:',
+  '              compaction: true',
+  '            config:',
+  '              - id: compaction-basic',
+  "                name: '@deepseek-ai/dsh-compaction-basic'",
+  '                config:',
+  '                  auto: true',
+  '              - id: command-compact',
+  "                name: '@deepseek-ai/dsh-command-compact'",
+  '# 下一个块的前导注释，必须活下来',
+  '- insert:',
+  '    - id: preset-other',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: other',
+  '        order: 9',
+  '        plugins: []',
+  '',
+].join('\n');
+writeFileSync(join(richProfile, 'cordis.patch.yml'), RICH_PATCH, 'utf8');
+const richCtx = fakeCtx();
+apply(richCtx);
+richCtx.provide('profileContext', { dir: richProfile });
+const richList = jsonOf(await callRoute(richCtx.routes.find((r) => r.path.endsWith('/profile-presets'))));
+const rich = richList.presets.find((p) => p.presetId === 'rich');
+check('a cordis:group is not counted as a package',
+  !rich.packages.includes('cordis:group'), JSON.stringify(rich.packages));
+check('the group leaves are flattened into the package list',
+  rich.packages.includes('@deepseek-ai/dsh-compaction-basic')
+  && rich.packages.includes('@deepseek-ai/dsh-command-compact'),
+  JSON.stringify(rich.packages));
+check('the group is still reported as a group', Array.isArray(rich.groups) && rich.groups.length === 1,
+  JSON.stringify(rich.groups));
+
+const richOverwrite = await callRoute(richCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({
+    mode: 'overwrite',
+    presetId: 'rich',
+    topId: 'preset-rich',
+    name: '丰富的预设',
+    order: 5,
+    personaFields: { prefix: '新人设。', suffix: '', complete: true, includeRuntimeContext: false },
+    // 勾上 group 里的叶子（界面看到的正是这批扁平包名）
+    packages: ['@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact'],
+  }),
+});
+const richBody = jsonOf(richOverwrite);
+const richAfter = readFileSync(join(richProfile, 'cordis.patch.yml'), 'utf8');
+check('the rich overwrite succeeds', richBody?.ok === true, JSON.stringify(richBody).slice(0, 200));
+check('it reports that it rebuilt row-by-row', richBody?.overwriteRebuilt === true);
+check('the persona row survived (regression: the row split never matched)',
+  richAfter.includes('新人设。') && !richAfter.includes('旧人设。'),
+  richAfter.split('\n').slice(richAfter.split('\n').findIndex((l) => l.includes('plugins:')), ).join('\n').slice(0, 300));
+check('the persona row keeps its own comment line',
+  richAfter.includes('# ── 必选：人设'), richAfter.split('\n').slice(0, 25).join(' | '));
+check('a kept tool row keeps its comment',
+  richAfter.includes("# ── 长会话压缩 ── 阈值 111,616"));
+check('the commented-out candidate rows are untouched',
+  richAfter.includes('# - id: tool-todo') && richAfter.includes("#   name: '@deepseek-ai/dsh-tool-todo'"));
+// 曾经的 bug：group 保留后叶子又被当「新包」追加一遍 → 重复声明。
+check('group leaves are not duplicated as top-level rows',
+  (richAfter.match(/@deepseek-ai\/dsh-compaction-basic/g) ?? []).length === 1,
+  `${(richAfter.match(/@deepseek-ai\/dsh-compaction-basic/g) ?? []).length} occurrences`);
+check('the group row keeps its isolate semantics',
+  richAfter.includes('            group: true') && richAfter.includes('              compaction: true'));
+check('the group keeps both of its leaves', (() => {
+  const from = richAfter.split('\n').findIndex((l) => l.includes('name: cordis:group'));
+  const seg = richAfter.split('\n').slice(from, from + 15).join('\n');
+  return seg.includes('dsh-compaction-basic') && seg.includes('dsh-command-compact');
+})());
+check('no comment line is duplicated (regression: the tail scan copied them all)',
+  (() => {
+    const counts = new Map();
+    for (const l of richAfter.split('\n')) {
+      if (!/^\s*#/.test(l)) continue;
+      counts.set(l, (counts.get(l) ?? 0) + 1);
+    }
+    return [...counts].every(([, n]) => n === 1);
+  })(), [...new Set(richAfter.split('\n').filter((l) => /^\s*#/.test(l))
+    .map((l) => `${l}:${richAfter.split('\n').filter((x) => x === l).length}`))].join(' | '));
+check('no generated file header leaked into the profile',
+  !richAfter.includes('# Generated by Agent Preset Studio.'));
+check('the next block and its leading comment are intact',
+  richAfter.includes('# 下一个块的前导注释，必须活下来')
+  && richAfter.includes('    - id: preset-other')
+  && richAfter.includes('        plugins: []'));
+// 覆盖后再解析：结构必须还认得出来，且不丢不重。
+const richCtx2 = fakeCtx();
+apply(richCtx2);
+richCtx2.provide('profileContext', { dir: richProfile });
+const richRelist = jsonOf(await callRoute(richCtx2.routes.find((r) => r.path.endsWith('/profile-presets'))));
+const richReload = richRelist.presets.find((p) => p.presetId === 'rich');
+check('the reloaded preset has no duplicate packages',
+  new Set(richReload.packages).size === richReload.packages.length, JSON.stringify(richReload.packages));
+check('the reloaded preset kept its group leaves',
+  richReload.packages.includes('@deepseek-ai/dsh-command-compact'), JSON.stringify(richReload.packages));
+check('the reloaded persona round-trips', richReload.persona.prefix === '新人设。', richReload.persona?.prefix);
+
+// 取消勾选某一行时，它上面的注释也该一起消失 —— 注释是跟着它那一行的。
+const dropCtx = fakeCtx();
+apply(dropCtx);
+dropCtx.provide('profileContext', { dir: richProfile });
+await callRoute(dropCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({
+    mode: 'overwrite',
+    presetId: 'rich',
+    topId: 'preset-rich',
+    name: '丰富的预设',
+    order: 5,
+    personaFields: richReload.persona,
+    packages: ['@deepseek-ai/dsh-tool-fs'],   // 只留 fs，取消勾选整组
+  }),
+});
+const dropped = readFileSync(join(richProfile, 'cordis.patch.yml'), 'utf8');
+check('de-selecting a row removes the row itself', !dropped.includes('dsh-command-compact'));
+check('de-selecting a row removes the comment that annotated it',
+  !dropped.includes('# ── 长会话压缩 ── 阈值 111,616'));
+check('rows that stayed are still there', dropped.includes("name: '@deepseek-ai/dsh-tool-fs'"));
+
+// --- 取消勾选 persona（prefix 清空）→ 人设行连同它的注释一起删 ----------
+// 界面上「取消勾选 persona」实际就是把 prefix 清空。重建时整行都不该留：
+// 注释是跟随它那一行的（铁律②），行没了，注释也必须一起消失。
+console.log('\n== a cleared persona prefix removes the row and its comment ==');
+const personaDropCtx = fakeCtx();
+apply(personaDropCtx);
+personaDropCtx.provide('profileContext', { dir: richProfile });
+await callRoute(personaDropCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({
+    mode: 'overwrite',
+    presetId: 'rich',
+    topId: 'preset-rich',
+    name: '丰富的预设',
+    order: 5,
+    personaFields: { prefix: '', suffix: '', complete: false, includeRuntimeContext: true },
+    packages: ['@deepseek-ai/dsh-tool-fs'],
+  }),
+});
+const personaDropped = readFileSync(join(richProfile, 'cordis.patch.yml'), 'utf8');
+check('a cleared persona prefix removes the persona row itself',
+  !personaDropped.includes('dsh-persona') && !personaDropped.includes('新人设。'));
+check('the persona row comment disappears with it',
+  !personaDropped.includes('# ── 必选：人设'));
+check('kept rows and the next block survive the persona drop',
+  personaDropped.includes("name: '@deepseek-ai/dsh-tool-fs'")
+  && personaDropped.includes('# 下一个块的前导注释，必须活下来')
+  && personaDropped.includes('    - id: preset-other'));
+
+// --- 结构认不出来 → 老实退回整块重写，绝不猜 ------------------------------
+// `plugins:` 用了内联非空列表这类我们认不出的写法时，按插件行重建无解，
+// 必须整块重写，并把 overwriteRebuilt=false + warning 如实报给界面
+// （覆盖写是直接改用户配置的动作，走没走按行重建必须让用户看得见）。
+console.log('\n== unparseable plugin shape falls back to a whole-block rewrite ==');
+const weirdProfile = mkdtempSync(join(tmpdir(), 'aps-weird-'));
+const WEIRD_PATCH = [
+  '# 块 A 的前导注释（在块外，不在替换范围内）',
+  '- insert:',
+  '    - id: preset-weird',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: weird',
+  '        name: 认不出来的预设',
+  '        order: 5',
+  '        plugins: [ @deepseek-ai/dsh-tool-fs ]',
+  '# 下一个块的前导注释',
+  '- insert:',
+  '    - id: preset-next',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: next',
+  '        order: 6',
+  '        plugins: []',
+  '',
+].join('\n');
+writeFileSync(join(weirdProfile, 'cordis.patch.yml'), WEIRD_PATCH, 'utf8');
+const weirdCtx = fakeCtx();
+apply(weirdCtx);
+weirdCtx.provide('profileContext', { dir: weirdProfile });
+const weirdResponse = await callRoute(weirdCtx.routes.find((r) => r.path.endsWith('/export')), {
+  method: 'POST',
+  body: JSON.stringify({
+    mode: 'overwrite',
+    presetId: 'weird',
+    topId: 'preset-weird',
+    name: '整块重写',
+    order: 5,
+    personaFields: { prefix: '整块重写的新人设。', suffix: '', complete: true, includeRuntimeContext: false },
+    packages: [],
+  }),
+});
+const weirdBody = jsonOf(weirdResponse);
+check('an unparseable block still exports successfully', weirdBody?.ok === true,
+  JSON.stringify(weirdBody).slice(0, 200));
+check('it reports the whole-block rewrite honestly', weirdBody?.overwriteRebuilt === false);
+check('the warning says the shape was not understood', typeof weirdBody?.warning === 'string'
+  && weirdBody.warning.includes('结构认不出来'), weirdBody?.warning);
+const weirdAfter = readFileSync(join(weirdProfile, 'cordis.patch.yml'), 'utf8');
+check('the unparseable plugins shape is gone from the file',
+  !weirdAfter.includes('plugins: [ @deepseek-ai'));
+check('the rewritten persona is in the file', weirdAfter.includes('整块重写的新人设。'));
+check('the next block and its leading comment are intact',
+  weirdAfter.includes('# 下一个块的前导注释')
+  && weirdAfter.includes('    - id: preset-next'));
+
+// --- 草稿损坏 / 是数组 / 不是对象 → 不崩、退回全新草稿 ----------------------
+// 草稿是界面勾选状态的唯一持久化，坏了不能把工作室也带崩：读不到就退回
+// 全新一份（selected 为空、personaFields 无），并且 draftError 要有值 ——
+// 界面靠它把「草稿坏了」如实告诉用户，而不是假装什么都没发生。
+console.log('\n== damaged draft files degrade cleanly ==');
+const damagedCases = [
+  { name: 'an array is not a draft', body: '[]' },
+  { name: 'a bare string is not a draft', body: '"just a string"' },
+  { name: 'unparseable JSON', body: '{broken json' },
+];
+const draftFilePath = getBody.path;
+const originalDraftBytes = readFileSync(draftFilePath, 'utf8');
+for (const tc of damagedCases) {
+  writeFileSync(draftFilePath, tc.body, 'utf8');
+  const damaged = jsonOf(await callRoute(draftRoute));
+  check(`${tc.name} still answers 200 without crashing`,
+    damaged?.error !== undefined
+    && Array.isArray(damaged?.draft?.selected)
+    && damaged.draft.selected.length === 0
+    && damaged.draft.personaFields === undefined,
+    JSON.stringify(damaged).slice(0, 200));
+}
+writeFileSync(draftFilePath, originalDraftBytes, 'utf8');
+check('the original draft bytes are restored for later tests',
+  readFileSync(draftFilePath, 'utf8') === originalDraftBytes);
 
 // --- The archive index must not leak descriptors ------------------------
 // shipped once as `return { entries, fd }` with no dispose: every scan leaked

@@ -22,3 +22,6 @@ _*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 运行时勾选草稿（界面每次勾选都会写，不进版本库）
+lib/.studio-draft.json

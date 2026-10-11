@@ -428,5 +428,429 @@ check('the two columns are separate headings so neither can masquerade as the ot
 check('rows carry a stable-width tools column so the description keeps its room',
   /rowShipsHead:/.test(source) && /rowShips:/.test(source));
 
-console.log(`\n== ${pass} passed, ${fail} failed ==\n`);
-process.exit(fail === 0 ? 0 : 1);
+// --- 交互层：轻量渲染模拟 ------------------------------------------------
+// 方案：不引入第三方 DOM 库（仓库保持零依赖）。用 mock fetch 完整加载
+// client.js，把 react 桩升级成「真值求值器」：
+//   · 函数组件直接调用、类组件 new + render()（error boundary 的兜底逻辑
+//     在这里真实生效），宿主标签收集成可遍历的节点树；
+//   · useState 的 setter 更新 hook 槽位并触发整树重渲染（同 React 语义）；
+//   · useEffect 在每轮渲染后统一 flush，deps 变了才重跑；
+//   · useMemo 按 deps 缓存 —— 否则每次重渲染都会新建 store，勾选就白存了，
+//     那正是本次要修的核心 bug，模拟器必须还原这个语义才能测出修复。
+// 这足以驱动「勾选 → 切页回来还在」这条核心修复的真实数据流。
+console.log('\n== interaction layer (restore, tab switches, toggles) ==');
+
+const makeRenderer = () => {
+  const contexts = new Map();   // 组件函数 -> { cursor, hooks: [] }
+  let current = null;           // 正在渲染的组件
+  let pendingEffects = [];
+  let rerenderQueued = false;
+  let rendering = false;
+  let rootComponent = null;
+  let rootProps = null;
+
+  const sameDeps = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+
+  class Component {
+    constructor(props) { this.props = props ?? {}; this.state = {}; }
+    setState(patch) { this.state = { ...this.state, ...patch }; }
+    render() { return null; }
+  }
+  const Fragment = {};
+
+  const render = (type, props) => {
+    rootComponent = type;
+    rootProps = props ?? {};
+    let tree = null;
+    do {
+      rerenderQueued = false;
+      rendering = true;
+      tree = createElement(rootComponent, rootProps);
+      rendering = false;
+      while (pendingEffects.length > 0) pendingEffects.shift()();
+    } while (rerenderQueued);
+    return tree;
+  };
+
+  const createElement = (type, props, ...children) => {
+    const normalized = props ?? {};
+    const flat = children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false);
+    if (typeof type === 'function') {
+      // 类组件（StudioBoundary）实例化后走 render()；函数组件直接调用。
+      if (type.prototype && typeof type.prototype.render === 'function') {
+        const rendered = new type({ ...normalized, children: flat }).render();
+        // 类组件 render 可能直接返回 children 数组（React 也允许），
+        // 统一包成 Fragment 节点，保证上层能继续遍历。
+        return Array.isArray(rendered) ? { type: Fragment, children: rendered } : rendered;
+      }
+      let ctx = contexts.get(type);
+      if (ctx === undefined) { ctx = { cursor: 0, hooks: [] }; contexts.set(type, ctx); }
+      const parent = current;
+      current = ctx;
+      ctx.cursor = 0;
+      let out;
+      try {
+        out = type({ ...normalized, children: flat });
+      } catch (error) {
+        // 兜底：渲染抛错也要能往下看（不掩盖，错误原文进树）。
+        out = createElement('div', {}, String(error?.stack ?? error?.message ?? error));
+      }
+      current = parent;
+      return out;
+    }
+    if (type === Fragment) return flat;
+    return { type, props: normalized, children: flat };
+  };
+
+  const useState = (init) => {
+    const ctx = current;
+    let hook = ctx.hooks[ctx.cursor];
+    if (hook === undefined) {
+      hook = { kind: 'state', value: typeof init === 'function' ? init() : init };
+      hook.set = (next) => {
+        hook.value = typeof next === 'function' ? next(hook.value) : next;
+        rerenderQueued = true;
+        // 渲染外 set → 排一个微任务重渲染，避免同步重入。
+        if (!rendering) queueMicrotask(() => { if (rerenderQueued) render(rootComponent, rootProps); });
+      };
+      ctx.hooks[ctx.cursor] = hook;
+    }
+    ctx.cursor += 1;
+    return [hook.value, hook.set];
+  };
+
+  const useEffect = (fn, deps) => {
+    const ctx = current;
+    let hook = ctx.hooks[ctx.cursor];
+    if (hook === undefined) { hook = { kind: 'effect', deps: undefined }; ctx.hooks[ctx.cursor] = hook; }
+    ctx.cursor += 1;
+    const changed = hook.deps === undefined || !sameDeps(hook.deps, deps ?? []);
+    if (changed) { hook.deps = deps ?? []; pendingEffects.push(fn); }
+  };
+
+  const useRef = (initial) => {
+    const ctx = current;
+    let hook = ctx.hooks[ctx.cursor];
+    if (hook === undefined) { hook = { kind: 'ref', value: { current: initial } }; ctx.hooks[ctx.cursor] = hook; }
+    ctx.cursor += 1;
+    return hook.value;
+  };
+
+  const useMemo = (fn, deps) => {
+    const ctx = current;
+    let hook = ctx.hooks[ctx.cursor];
+    if (hook === undefined) { hook = { kind: 'memo', deps: undefined, value: undefined }; ctx.hooks[ctx.cursor] = hook; }
+    ctx.cursor += 1;
+    const changed = hook.deps === undefined || !sameDeps(hook.deps, deps ?? []);
+    if (changed) { hook.deps = deps ?? []; hook.value = fn(); }
+    return hook.value;
+  };
+
+  const useCallback = (fn, deps) => {
+    const ctx = current;
+    let hook = ctx.hooks[ctx.cursor];
+    if (hook === undefined) { hook = { kind: 'cb', deps: undefined, value: undefined }; ctx.hooks[ctx.cursor] = hook; }
+    ctx.cursor += 1;
+    const changed = hook.deps === undefined || !sameDeps(hook.deps, deps ?? []);
+    if (changed) { hook.deps = deps ?? []; hook.value = fn; }
+    return hook.value;
+  };
+
+  return {
+    Component, Fragment, render, createElement,
+    useState, useEffect, useRef, useMemo, useCallback,
+  };
+};
+
+// 树遍历 helper：找出某种节点 / 有某个属性的节点。
+const walkTree = (node, fn) => {
+  if (node === null || node === undefined || typeof node !== 'object') return;
+  fn(node);
+  if (Array.isArray(node.children)) for (const child of node.children) walkTree(child, fn);
+};
+const byType = (root, type) => { const out = []; walkTree(root, (n) => { if (n.type === type) out.push(n); }); return out; };
+const byProp = (root, pred) => { const out = []; walkTree(root, (n) => { if (typeof n === 'object' && n.props !== undefined && pred(n.props)) out.push(n); }); return out; };
+const inputsOfType = (root, kind) => byType(root, 'input').filter((n) => n.props?.type === kind);
+const checkboxesOf = (root) => inputsOfType(root, 'checkbox');
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// 一份「有草稿」的宿主：勾了 read，prefix/suffix 都是草稿里的值，来源是
+// 现有预设 mock-preset —— 这是「切页回来勾选还在」的种子数据。
+const restoredDraftPayload = {
+  ok: true,
+  draft: {
+    selected: ['read'],
+    personaFields: {
+      prefix: '草稿恢复的前缀。',
+      suffix: '草稿后缀',
+      complete: false,
+      includeRuntimeContext: true,
+    },
+    source: { mode: 'edit', presetId: 'mock-preset', topId: 'preset-mock', name: 'Mock 预设', order: 3 },
+  },
+  path: '/mock/profiles/desktop/.studio-draft.json',
+};
+
+const buildInteractive = (draftPayload) => {
+  const captured3 = {};
+  const interactiveFetch = async (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    const path = String(url).split('/').pop();
+    let payload;
+    if (path === 'snapshot') {
+      payload = {
+        ok: true,
+        mounted: [
+          { name: 'read', description: '读文件', tokens: 100 },
+          { name: 'write', description: '写文件', tokens: 200 },
+        ],
+        mountedTokens: 300,
+        availablePackages: [
+          { package: '@deepseek-ai/dsh-tool-fs', version: '1.0.0', toolNames: ['read', 'write'], anyMounted: true, summary: '文件系统工具' },
+        ],
+        presets: [],
+        defaultOutputRoot: '/mock/output',
+        profileDir: '/mock/profiles/desktop',
+        presetError: undefined,
+      };
+    } else if (path === 'draft') {
+      payload = method === 'GET' ? draftPayload : { ok: true, path: '/mock/profiles/desktop/.studio-draft.json' };
+    } else if (path === 'profile-presets') {
+      payload = {
+        ok: true,
+        presets: [
+          {
+            presetId: 'mock-preset', topId: 'preset-mock', name: 'Mock 预设', order: 3,
+            persona: { prefix: '现有预设的前缀。', suffix: '', complete: true, includeRuntimeContext: false },
+            packages: ['@deepseek-ai/dsh-tool-fs'],
+          },
+        ],
+      };
+    } else {
+      payload = { ok: true, dir: '/mock/export/out', linesBefore: 12, linesAfter: 12 };
+    }
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const interactiveSandbox = {
+    window: { __ModuleLoader__: { load: (spec) => { captured3.spec = spec; } } },
+    console,
+    setTimeout,
+    clearTimeout,
+    queueMicrotask,
+    fetch: interactiveFetch,
+    AbortController,
+    Response,
+    CustomEvent,
+  };
+  vm.createContext(interactiveSandbox);
+  vm.runInContext(source, interactiveSandbox);
+  const renderer = makeRenderer();
+  let lastStore = undefined;
+  const origMemo = renderer.useMemo;
+  renderer.useMemo = (factory, deps) => {
+    const v = origMemo(factory, deps);
+    if (v !== null && typeof v === 'object' && typeof v.get === 'function') lastStore = v;
+    return v;
+  };
+  const reactInteractive = {
+    Component: renderer.Component,
+    Fragment: renderer.Fragment,
+    createElement: renderer.createElement,
+    useCallback: renderer.useCallback,
+    useEffect: renderer.useEffect,
+    useMemo: renderer.useMemo,
+    useRef: renderer.useRef,
+    useState: renderer.useState,
+  };
+  const plugin3 = captured3.spec.factory((name) => {
+    if (name === 'react') return reactInteractive;
+    throw new Error(`undeclared module requested: ${name}`);
+  });
+  let settingsComponent3;
+  const captureCtx3 = {
+    locale: { register: () => () => {}, bind: () => (k) => k },
+    effect: (fn) => { fn(); return () => {}; },
+    slots: {
+      inject: (_slot, fn) => fn(),
+      register: (def, Component) => { settingsComponent3 = Component; return () => {}; },
+    },
+    inject: (_deps, fn) => fn({ effect: (f) => f(), get: () => undefined, slots: captureCtx3.slots }),
+  };
+  plugin3.apply(captureCtx3);
+  const renderProps = { t: (key) => key };
+  return {
+    getTree: () => renderer.render(settingsComponent3, renderProps),
+    getStore: () => lastStore,
+    initial: renderer.render(settingsComponent3, renderProps),
+  };
+};
+
+// 点击某个 tab：按钮文本就是 t('tabPrompt') 之类的 key。
+const clickTab = (tree, id) => {
+  // 按钮文案是 t('tabPrompt') 这类字典键（测试桩 t 原样返回键名），
+  // 所以按 id 拼出对应键名再去匹配。
+  const tabKey = `tab${id[0].toUpperCase()}${id.slice(1)}`;
+  const button = byType(tree, 'button').find((n) => n.props?.onClick !== undefined
+    && Array.isArray(n.children) && n.children.includes(tabKey));
+  if (button === undefined) return false;
+  button.props.onClick();
+  return true;
+};
+
+(async () => {
+  // —— 挂载 + 草稿恢复：勾选、人设四字段、编辑来源都要在渲染层看得见 ——
+  const app = buildInteractive(restoredDraftPayload);
+  await tick();   // 让挂载数据链（restoreDraft → loadSnapshot → presets）跑完
+  let tree = app.getTree();
+  const textBits = [];
+  walkTree(tree, (n) => {
+    if (typeof n === 'object' && Array.isArray(n.children)) {
+      for (const c of n.children) if (typeof c === 'string') textBits.push(c);
+    }
+  });
+  console.log('TREE-ROOT', tree?.type, 'bits', textBits.slice(0, 12).join(' | '));
+
+  check('the default tab renders a checked selection restored from the draft',
+    checkboxesOf(tree).some((n) => n.props.checked === true),
+    `checked=${checkboxesOf(tree).map((n) => n.props.checked).join(',')}`);
+
+  // 切到系统提示词页：两个文本框 + 两个载入下拉 + 两个开关都要渲染出来。
+  clickTab(tree, 'prompt');
+  await tick();
+  tree = app.getTree();
+  const promptTextareas = byType(tree, 'textarea');
+  const promptSelects = byType(tree, 'select');
+  const promptToggles = checkboxesOf(tree);
+  check('the prompt tab renders two textareas (prefix / suffix)',
+    promptTextareas.length === 2, `${promptTextareas.length}`);
+  check('the prompt tab renders two preset-loading selects',
+    promptSelects.length === 2, `${promptSelects.length}`);
+  check('the prompt tab renders the complete and includeRuntimeContext toggles',
+    promptToggles.length === 2, `${promptToggles.length}`);
+  check('the draft prefix is restored into the rendered prefix box',
+    promptTextareas[0]?.props?.value === '草稿恢复的前缀。', promptTextareas[0]?.props?.value);
+  check('the draft suffix is restored into the rendered suffix box',
+    promptTextareas[1]?.props?.value === '草稿后缀', promptTextareas[1]?.props?.value);
+  check('the edit-source select is restored to the draft preset',
+    promptSelects[1]?.props?.value === 'mock-preset', promptSelects[1]?.props?.value);
+  check('the complete toggle is restored off', promptToggles[0]?.props?.checked === false);
+  check('the includeRuntimeContext toggle is restored on',
+    promptToggles[1]?.props?.checked === true);
+
+  // —— 开关交互：点击后 store 跟着变，渲染也跟着变 ——
+  promptToggles[0].props.onChange();
+  await tick();
+  tree = app.getTree();
+  check('clicking the complete toggle flips it on',
+    checkboxesOf(tree)[0]?.props?.checked === true,
+    String(checkboxesOf(tree)[0]?.props?.checked));
+  checkboxesOf(tree)[1].props.onChange();
+  await tick();
+  tree = app.getTree();
+  check('clicking the includeRuntimeContext toggle flips it off',
+    checkboxesOf(tree)[1]?.props?.checked === false,
+    String(checkboxesOf(tree)[1]?.props?.checked));
+
+  // —— 核心修复：切到别的设置页再回来，草稿恢复的勾选还在 ——
+  // 注意：已挂表按「工具名」键，草稿里的勾选正是工具名，所以这里必须在
+  // 载入现有预设**之前**验证 —— 载入预设会把 packages（包名）写进勾选集，
+  // 包名只在「可挂」表按包名键可见，那是另一把尺子（见 keyingNote）。
+  clickTab(tree, 'tools');
+  await tick();
+  tree = app.getTree();
+  check('the tools tab still shows the selection after switching away',
+    checkboxesOf(tree).some((n) => n.props.checked === true),
+    `n=${checkboxesOf(tree).length} checked=${checkboxesOf(tree).map((n) => n.props.checked).join(',')}`);
+  check('the restored tool is the one the draft selected',
+    app.getStore()?.get()?.selected?.has('read') === true,
+    `selected=${JSON.stringify([...(app.getStore()?.get()?.selected ?? [])])}`);
+  clickTab(tree, 'prompt');
+  await tick();
+  tree = app.getTree();
+  check('the persona fields survive a round trip through another tab',
+    byType(tree, 'textarea')[0]?.props?.value === '草稿恢复的前缀。',
+    byType(tree, 'textarea')[0]?.props?.value);
+  check('the edit-source marker survives the round trip too',
+    byType(tree, 'select')[1]?.props?.value === 'mock-preset');
+
+  // —— 载入现有预设：人设四字段 + 工具勾选（包名写进勾选集）一起载入 ——
+  promptSelects[1].props.onChange({ target: { value: 'mock-preset' } });
+  await tick();
+  tree = app.getTree();
+  check('loading an existing preset fills the prefix box',
+    byType(tree, 'textarea')[0]?.props?.value === '现有预设的前缀。',
+    byType(tree, 'textarea')[0]?.props?.value);
+  check('loading an existing preset fills the complete toggle',
+    checkboxesOf(tree)[0]?.props?.checked === true,
+    String(checkboxesOf(tree)[0]?.props?.checked));
+  check('loading an existing preset seeds the package selection',
+    app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-fs') === true,
+    `selected=${JSON.stringify([...(app.getStore()?.get()?.selected ?? [])])}`);
+
+  // —— 导出页：覆盖 / 另存开关，以及载入过现有预设时的灰态解除 ——
+  clickTab(tree, 'export');
+  await tick();
+  tree = app.getTree();
+  const radios = inputsOfType(tree, 'radio');
+  check('the export tab offers both modes', radios.length === 2, `${radios.length}`);
+  check('overwrite is enabled once an existing preset is loaded',
+    radios[1]?.props?.disabled !== true, String(radios[1]?.props?.disabled));
+  check('the export form is pre-filled with the edited preset id',
+    byProp(tree, (p) => p.placeholder === 'my-mode')[0]?.props?.value === 'mock-preset',
+    byProp(tree, (p) => p.placeholder === 'my-mode')[0]?.props?.value);
+  radios[0].props.onChange();
+  await tick();
+  tree = app.getTree();
+  check('switching to save-as unchecks the overwrite radio',
+    inputsOfType(tree, 'radio')[1]?.props?.checked === false,
+    String(inputsOfType(tree, 'radio')[1]?.props?.checked));
+
+  // —— 导出交互：点导出按钮，结果块要渲染出来 ——
+  // 另存模式下主按钮文案是 t('exportSave')，t 返回 key 本身。
+  const runButton = byType(tree, 'button').find((n) => Array.isArray(n.children)
+    && n.children.includes('exportSave'));
+  check('the export button is reachable on the export tab', runButton !== undefined);
+  runButton?.props?.onClick();
+  await tick();
+  tree = app.getTree();
+  check('running an export renders the done note',
+    walkTreeResult(tree, 'exportDone'));
+
+  // —— 没有载入过现有预设：覆盖开关必须保持灰态 ——
+  const freshApp = buildInteractive({ ok: true, draft: null, path: '/mock/profiles/desktop/.studio-draft.json' });
+  await tick();
+  let freshTree = freshApp.getTree();
+  clickTab(freshTree, 'prompt');
+  await tick();
+  freshTree = freshApp.getTree();
+  check('a fresh store has no edit source', byType(freshTree, 'select')[1]?.props?.value === '');
+  clickTab(freshTree, 'export');
+  await tick();
+  freshTree = freshApp.getTree();
+  const freshRadios = inputsOfType(freshTree, 'radio');
+  check('overwrite stays disabled without a loaded preset',
+    freshRadios[1]?.props?.disabled === true, String(freshRadios[1]?.props?.disabled));
+
+  console.log(`\n== ${pass} passed, ${fail} failed ==\n`);
+  process.exit(fail === 0 ? 0 : 1);
+})().catch((error) => {
+  console.error('\nINTERACTIVE-CRASH');
+  console.error(error?.stack ?? error);
+  process.exit(1);
+});
+
+// walkTreeResult：在树里找一个 div，其直接文本子节点包含指定片段
+// （导出结果 note 是一整个带样式的 div，文本是 t('exportDone') 之类的 key）。
+function walkTreeResult(tree, needle) {
+  let found = false;
+  walkTree(tree, (n) => {
+    if (found) return;
+    if (n.type === 'div' && Array.isArray(n.children)
+      && n.children.some((c) => typeof c === 'string' && c.includes(needle))) {
+      found = true;
+    }
+  });
+  return found;
+}
