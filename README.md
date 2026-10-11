@@ -55,7 +55,18 @@
 
 ## 安装
 
-本机没有独立的 node / pnpm 可执行文件，profile 的 pnpm 要用 Electron 当 Node 跑：
+本机没有独立的 node / pnpm 可执行文件，profile 的 pnpm 要用 Electron 当 Node 跑。
+下面命令里的 `<DSH 根目录>` 换成**你的** DeepSeek Harness 安装目录
+（Windows 默认通常是 `C:/Users/<用户名>/AppData/Local/Programs/` 下的安装位置；
+例子里用的是 `E:/deepseek`）：
+
+```bash
+cd ~/.dsh/profiles/desktop
+ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
+  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add <本插件clone到的目录>
+```
+
+例（DSH 装在 `E:/deepseek`、插件 clone 到 `E:/deepseek/agent-preset-studio` 时）：
 
 ```bash
 cd ~/.dsh/profiles/desktop
@@ -79,13 +90,20 @@ ELECTRON_RUN_AS_NODE=1 "E:/deepseek/DeepSeek Harness.exe" \
 ## 验证
 
 ```bash
-node test-host.mjs      # 98 断言：宿主半全链路（真实 asar 扫描、patch 生成、超时降级、asar 拦截）
-node test-client.mjs    # 24 断言：客户端结构（字典对称、t() 键覆盖、内联字典、abort 兜底、空白页守卫）
-node test-install.mjs   # 32 断言：安装预检（manifest / 链接 / 双端可加载性）
+node test-host.mjs      # 宿主半全链路（真实 asar 扫描、patch 生成、超时降级、asar 拦截）
+node test-client.mjs    # 客户端结构（字典对称、t() 键覆盖、内联字典、abort 兜底、空白页守卫）
+node test-install.mjs   # 安装预检（manifest / 链接 / 双端可加载性；未安装时自动跳过）
 ```
 
-三套都通过才算健康。`test-host.mjs` 会真的去扫本机 `app.asar`，
-所以它同时能告诉你当前能识别到多少个工具包和工具名（实测：22 包 / 235 工具）。
+三套都通过才算健康。
+
+> **注意**：`test-host.mjs` 会真的去扫本机的 `app.asar`，所以它需要跑在一台
+> **装着 DeepSeek Harness 的机器**上。在没有 DSH 的环境里，依赖安装的
+> catalogue / export 测试节会明确说明并跳过（前面的纯逻辑测试照常完整运行）；
+> `test-install.mjs` 在 profile 里没装本插件时同样自动跳过。
+
+在装了 DSH 的机器上，`test-host.mjs` 同时能告诉你当前识别到多少工具包
+（当前开发机实测：22 包 / 35 个工具名）。
 
 ---
 
@@ -140,7 +158,7 @@ handler: (request) => json({ ok: true })                              // ❌ 永
 
 ### 4. ⚠️ Electron 会拦截 `openSync('.../app.asar')`（只在运行时炸）
 
-`fs.openSync('E:/deepseek/resources/app.asar')`
+`fs.openSync('<DSH 安装目录>/resources/app.asar')`（下例用了开发机的路径 `E:/deepseek`）
 **在纯 Node 里成功（121,348,951 字节），在 Electron 主进程里报 ENOENT。**
 
 原因：Electron patch 过 fs，把路径里出现 `.asar` 的那一段当成**目录**去虚拟文件系统里查，
@@ -219,7 +237,7 @@ generated/            导出的预设包落在默认输出目录下
 ### AI 做了什么
 
 架构设计与全部实现、DSH 插件 API 的逆向（读 `app.asar` 提取真实契约）、
-169 条断言的三套测试、bug 根因定位（Electron asar 拦截、文件描述符泄漏、
+209 条断言的三套测试、bug 根因定位（Electron asar 拦截、文件描述符泄漏、
 路由 `node:http` 契约）、文档撰写。
 
 ### 免责声明

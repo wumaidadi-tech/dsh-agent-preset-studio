@@ -4,14 +4,29 @@
  * Checks the manifest the loader reads, resolves both halves through the
  * profile's own node_modules link, and confirms the host half exports the
  * shape a Cordis plugin must.
+ *
+ * ⚠️ 这是一条**安装预检**，不是源码测试：它检查的是「本机 profile 里的安装状态」。
+ * profile 不存在（还没安装 DSH / 没装本插件）时直接跳过并说明，不算失败 ——
+ * 源码完整性由 test-host.mjs / test-client.mjs 负责。
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const PROFILE = 'C:/Users/angel/.dsh/profiles/desktop';
+// profile 位置按**当前用户的 home** 推导，不写死任何人的机器路径。
+const PROFILE = join(homedir(), '.dsh', 'profiles', 'desktop');
 const PKG = '@local/dsh-agent-preset-studio';
+
+const profileManifestPath = join(PROFILE, 'package.json');
+if (!existsSync(profileManifestPath)) {
+  console.log('== install pre-flight ==');
+  console.log(`  info no DSH profile at ${PROFILE}`);
+  console.log('  info 插件尚未安装（或 profile 不在这个位置）—— 跳过安装预检。');
+  console.log('  info 安装方法见 README 的「安装」一节。源码测试请跑 test-host.mjs / test-client.mjs。');
+  process.exit(0);
+}
 
 let pass = 0;
 let fail = 0;
@@ -21,20 +36,28 @@ const check = (label, ok, detail) => {
 };
 
 console.log('\n== profile manifest ==');
-const profile = JSON.parse(readFileSync(join(PROFILE, 'package.json'), 'utf8'));
+const profile = JSON.parse(readFileSync(profileManifestPath, 'utf8'));
 const bundles = profile.dsh?.profile?.bundles ?? [];
 check('plugin is listed as a bundle', bundles.includes(PKG), bundles.join(', '));
 check('plugin is a declared dependency',
   Object.prototype.hasOwnProperty.call(profile.dependencies ?? {}, PKG),
   JSON.stringify(profile.dependencies?.[PKG]));
-check('dependency points at the workspace path',
-  profile.dependencies?.[PKG] === 'link:E:/deepseek/agent-preset-studio',
-  profile.dependencies?.[PKG]);
-check('every other original bundle survives',
-  ['dsh-better-sidebar', 'billion-context', 'dsh-context', 'dshmarket',
-   'dsh-rewind-plugin', 'dsh-sessions-manager', '@michengai/dsh-skills-manager',
-   '@aiwayds/dsh-web-search-anysearch', 'dsh-mcp-connector',
-   '@deepseek-ai/dsh-experimental-auto-review'].every((b) => bundles.includes(b)));
+// 依赖指向哪台机器的哪个目录因人而异，所以只断言**语义**：
+// 是个 link: 且链接目标真的存在（pnpm 的 workspace 链接装法）。
+// ⚠️ link: 目标可能是**绝对路径**（本机就是这么装的）也可能是相对 profile 的
+// 相对路径 —— 两种都要认：绝对路径直接用，相对路径拼到 profile 下再验。
+const depSpec = profile.dependencies?.[PKG];
+const depTarget = typeof depSpec === 'string' && depSpec.startsWith('link:')
+  ? depSpec.slice('link:'.length)
+  : undefined;
+const depResolves = (() => {
+  if (depTarget === undefined) return false;
+  // Windows 盘符（C:/）与 POSIX 根（/）都算绝对路径。
+  if (/^([a-zA-Z]:[\\/]|\/)/.test(depTarget)) return existsSync(depTarget);
+  return existsSync(join(PROFILE, depTarget));
+})();
+check('dependency is a link: that resolves to a real directory',
+  depResolves, String(depSpec));
 
 console.log('\n== resolution through the profile link ==');
 const linkedRoot = join(PROFILE, 'node_modules', PKG);

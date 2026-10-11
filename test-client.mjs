@@ -8,9 +8,13 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import vm from 'node:vm';
 
-const PATH = 'E:/deepseek/agent-preset-studio/lib/client.js';
+// 被测文件按**本文件所在位置**推导 —— 仓库 clone 到任何目录都能跑。
+const HERE = fileURLToPath(new URL('.', import.meta.url));
+const PATH = join(HERE, 'lib', 'client.js');
 const source = readFileSync(PATH, 'utf8');
 
 let pass = 0;
@@ -285,7 +289,7 @@ check('row.package.replace only runs behind a defined-check',
   || !/row\.package\.replace\(/.test(codeOnly));
 
 // The host must supply `package` on mounted rows so the two tables agree.
-const hostSource = readFileSync('E:/deepseek/agent-preset-studio/lib/index.js', 'utf8');
+const hostSource = readFileSync(join(HERE, 'lib', 'index.js'), 'utf8');
 check('the host enriches mounted rows with a resolved package',
   /mounted: mountedWithPackage/.test(hostSource)
   // 归属包现在先存进具名常量 `owner`（同一件事，读起来更清楚），

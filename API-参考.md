@@ -302,10 +302,11 @@ ctx.tools.restrict(filter)   // 允许/拒绝掩码
 - 失败 / 被取消 / 装了个没有 bundle patch 的包 → 会**把 `package.json` 与
   `pnpm-lock.yaml` 恢复原样**。
 - `pendingBuilds`：pnpm 拦下的依赖脚本会列出来，需要 `approvedBuilds` 授权。
-- ⚠️ **本机没有独立 node / pnpm 可执行文件**，要用：
+- ⚠️ **本机没有独立 node / pnpm 可执行文件**，要用 Electron 当 Node
+  （路径换成**你的** DSH 安装目录；`E:/deepseek` 是开发机的位置）：
   ```bash
-  ELECTRON_RUN_AS_NODE=1 "E:/deepseek/DeepSeek Harness.exe" \
-    "E:/deepseek/resources/runtime/pnpm/bin/pnpm.cjs" add <路径>
+  ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
+    "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add <路径>
   ```
 - ⚠️ pnpm 只写 `dependencies`；**`dsh.profile.bundles` 要手动加**，两处都写了才生效。
 
