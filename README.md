@@ -198,7 +198,19 @@ DSH 加载 profile 时**只读 `package.json` 里的 `dsh.profile.bundles` 名�
 
 ### 怎么修
 
-到 `~/.dsh/profiles/desktop/` 下按 pnpm 自己的提示走（二选一）：
+**先等一下**：`minimumReleaseAge` 的窗口是 **24 小时**。也就是说，那个被判
+「太新」的包**过一天就自动合规了**，不用你做任何事。日志里会写清截止时间：
+
+```
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
+  billion-context@0.1.192 was published at 2026-10-10T15:32:29.720Z,
+  within the minimumReleaseAge cutoff (2026-10-10T11:35:37.177Z)
+```
+
+>`cutoff` 就是「当前时间减 24 小时」。等 `published at` 早于新的 cutoff，
+>这一条就不再违规。上例里 10-10 15:32Z 发的包，到 **10-11 15:32Z** 自动放行。
+
+等不及的话，到 `~/.dsh/profiles/desktop/` 下按 pnpm 自己的提示走（二选一）：
 
 ```bash
 # 方案 A：清掉 lockfile 重新解析
@@ -212,6 +224,9 @@ ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
 ```
 
 处理完**到「插件」页重新安装一次**那个预设包即可，不用重新导出。
+
+> 💡 顺带一提：这一条**不影响你已经装好的插件**。它只在「往 profile 加新包」
+> 时才会挡路 —— 而导出预设正是在做这件事，所以才会撞上。
 
 ### 插件侧已经做的加固
 
