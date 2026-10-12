@@ -156,10 +156,12 @@ check('the plugin table is exactly the rows with no owning package',
 check('the official table lists every package, mounted or not',
   !/anyMounted !== true/.test(source)
   && /const officialPackages = useMemo\(\(\) => snapshot\?\.availablePackages \?\? \[\]/.test(source));
-// A row with no owning package must render a DISABLED checkbox — offering a tick
-// that silently does nothing on export is worse than offering none.
-check('mounted rows without an owner package get a disabled checkbox',
-  /disabled:\s*ownerMissing/.test(source));
+// A row with no owning package must NOT get a checkbox at all — offering a tick
+// that silently does nothing on export is worse than offering none. The whole
+// plugin table is a read-only list now.
+check('mounted rows without an owner package get no checkbox',
+  !/checked:\s*ownerMissing/.test(source)
+  && /return h\('div', \{\s*\n\s*key,/.test(source));
 
 // --- The two failure modes that render a blank page --------------------
 // Both of these shipped once and produced a page with no text and no error in
@@ -811,21 +813,19 @@ const clickTab = (tree, id) => {
   check('the restored package is the one the draft selected',
     app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-fs') === true,
     `selected=${JSON.stringify([...(app.getStore()?.get()?.selected ?? [])])}`);
-  // 没有归属包的行（第三方插件 / MCP 工具）预设声明不了 —— 复选框必须是**禁用**的。
-  // 给一个点了不生效的勾选框比不给更糟：用户会以为它已经进预设了。
+  // 插件工具表是**纯只读清单**：一个复选框都不该有。
+  // 给一个点了不生效的勾选框比不给更糟 —— 用户会以为它已经进预设了。
+  // 用户为此反馈过三次「改不了要他何用」，所以改成默认折叠 + 无勾选框。
   const boxes = checkboxesOf(tree);
-  check('a row with no owning package renders a disabled checkbox',
-    boxes.some((n) => n.props.disabled === true),
-    `disabled=${boxes.map((n) => n.props.disabled === true).join(',')}`);
-  check('a row with an owning package stays tickable',
-    boxes.some((n) => n.props.disabled !== true && n.props.checked === true),
-    `checked=${boxes.map((n) => n.props.checked).join(',')}`);
-  // 两分法：官方工具（read / write）**不在**插件工具表里，而是以「包」的形式
+  check('the plugin table renders no checkbox at all',
+    boxes.length === 1, `n=${boxes.length}`);
+  // 官方工具（read / write）**不在**插件工具表里，而是以「包」的形式
   // 出现在官方工具表 —— 哪怕这个包当前是挂着的（旧实现会把已挂载的包过滤掉，
   // 于是它从两张表里一起消失，用户既看不到「现在挂着什么」也没法取消）。
   // mock 里 dsh-tool-fs 的 anyMounted 是 true，正好验证这条。
   check('official tools move out of the plugin table entirely',
-    boxes.length === 2, `n=${boxes.length} disabled=${boxes.map((n) => n.props.disabled === true).join(',')}`);
+    boxes.some((n) => n.props.checked === true),
+    `checked=${boxes.map((n) => n.props.checked).join(',')}`);
   check('an ownerless row is never swallowed into the selection',
     app.getStore()?.get()?.selected?.has('zz_third_party_tool') !== true,
     JSON.stringify([...(app.getStore()?.get()?.selected ?? [])]));
