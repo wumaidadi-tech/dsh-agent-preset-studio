@@ -610,6 +610,20 @@ check('a throwing scoped layer does not sink the whole table',
   brokenBody.ok === true && brokenBody.mounted.some((r) => r.name === 'ok'),
   JSON.stringify(brokenBody.mounted?.map((r) => r.name)));
 
+// The diagnostics route must be able to say WHERE the rows came from, so
+// "the tools tab looks empty" can be told apart from "the layers were not read".
+const diagBody = jsonOf(await callRoute(
+  toolsCtx.routes.find((r) => r.path.endsWith('/diagnostics')),
+));
+check('diagnostics census reports the global layer size',
+  diagBody.registry?.globalRows === 1, JSON.stringify(diagBody.registry));
+check('diagnostics census reports the scoped layer count',
+  diagBody.registry?.scopedLayerCount === 1, JSON.stringify(diagBody.registry));
+check('diagnostics census reports the scoped row total',
+  diagBody.registry?.scopedRows === 1, JSON.stringify(diagBody.registry));
+check('diagnostics census contrasts it with the global-only schemas() view',
+  diagBody.registry?.schemasNoScopeRows === 1, JSON.stringify(diagBody.registry));
+
 // --- Mounted rows must carry a resolved `package` ----------------------
 // The client renders both tables with `row.package`, but the runtime tool
 // registry only knows tool *names*. Without this enrichment every mounted row
