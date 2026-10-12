@@ -1008,6 +1008,77 @@ check('the reloaded preset kept its group leaves',
   richReload.packages.includes('@deepseek-ai/dsh-command-compact'), JSON.stringify(richReload.packages));
 check('the reloaded persona round-trips', richReload.persona.prefix === '新人设。', richReload.persona?.prefix);
 
+// ── `/preset` 路由的 packages 必须和 profile-presets 同一套规则 ──────────
+// 实测踩过：`extractPresetPackages` 不 descend 分组的 `config` 数组、不过滤
+// `cordis:group`、不要求带斜杠。后果是 `/preset` 读 prompt-image-video 回来，
+// packages 里混进一个 `cordis:group`，而 persistent-shell 组的 5 个叶子一个都没进来
+// ——「从预设载入勾选」拿到一份错的选择集（组的包勾不上，还多一个幽灵项）。
+// 注意 `/profile-presets` 那条路（parseProfilePresets → readPresetBody）本来就是对的，
+// 所以这里**两条路由对着同一份 YAML 断言结果一致**。
+const GROUPED_PRESET_YAML = [
+  '- insert:',
+  '    - id: preset-grouped',
+  "      name: '@deepseek-ai/dsh-agent-preset'",
+  '      config:',
+  '        id: grouped',
+  '        name: 带分组的预设',
+  '        order: 9',
+  '        plugins:',
+  '          - id: persona',
+  "            name: '@deepseek-ai/dsh-persona'",
+  '            config:',
+  '              prefix: |-',
+  '                人设。',
+  '          - id: tool-fs',
+  "            name: '@deepseek-ai/dsh-tool-fs'",
+  '          - id: persistent-shell',
+  '            name: cordis:group',
+  '            group: true',
+  '            isolate:',
+  '              terminals: true',
+  '            config:',
+  '              - id: pty',
+  "                name: '@deepseek-ai/dsh-terminal'",
+  '              - id: terminal-pwsh',
+  "                name: '@deepseek-ai/dsh-terminal-bash'",
+  '                config:',
+  '                  shellDialect: pwsh',
+  '              - id: persistent-pwsh',
+  "                name: '@deepseek-ai/dsh-tool-pwsh-persistent'",
+  '          - id: present',
+  "            name: '@deepseek-ai/dsh-tool-present'",
+  '',
+].join('\n');
+
+const groupedCtx = fakeCtx();
+apply(groupedCtx);
+groupedCtx.provide('agentPresets', {
+  readDocument: async () => ({
+    content: GROUPED_PRESET_YAML,
+    name: '带分组的预设',
+    description: '带分组的预设',
+  }),
+});
+const groupedBody = jsonOf(await callRoute(
+  groupedCtx.routes.find((r) => r.path.endsWith('/preset')),
+  { method: 'POST', body: JSON.stringify({ id: 'grouped' }) },
+));
+check('the /preset route answers for a grouped preset', groupedBody.ok === true, JSON.stringify(groupedBody).slice(0, 200));
+check('a cordis:group is never reported as a package',
+  !(groupedBody.packages ?? []).includes('cordis:group'), JSON.stringify(groupedBody.packages));
+check('group leaves are flattened into the package list',
+  (groupedBody.packages ?? []).includes('@deepseek-ai/dsh-tool-pwsh-persistent')
+  && (groupedBody.packages ?? []).includes('@deepseek-ai/dsh-terminal-bash'),
+  JSON.stringify(groupedBody.packages));
+check('non-group rows survive alongside the group',
+  (groupedBody.packages ?? []).includes('@deepseek-ai/dsh-tool-fs')
+  && (groupedBody.packages ?? []).includes('@deepseek-ai/dsh-tool-present')
+  && (groupedBody.packages ?? []).includes('@deepseek-ai/dsh-persona'),
+  JSON.stringify(groupedBody.packages));
+check('the grouped package list has no duplicates',
+  new Set(groupedBody.packages ?? []).size === (groupedBody.packages ?? []).length,
+  JSON.stringify(groupedBody.packages));
+
 // 取消勾选某一行时，它上面的注释也该一起消失 —— 注释是跟着它那一行的。
 const dropCtx = fakeCtx();
 apply(dropCtx);
