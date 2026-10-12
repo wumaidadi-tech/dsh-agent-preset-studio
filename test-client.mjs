@@ -128,13 +128,28 @@ check('client only requires modules it declares', (() => {
   return required.every((n) => n === 'react' || n === 'react/jsx-runtime');
 })());
 check('every fetch carries an abort deadline', /AbortController/.test(source));
-check('mounted rows are seeded by name, not by package',
-  /snapshot\.mounted \?\? \[\]\)\s*\n\s*\.map\(\(row\) => row\.name\)/.test(source)
-  || /\.map\(\(row\) => row\.name\)/.test(source));
-// The token total reads the same keyed set the seeding wrote. Using row.package
-// there compiles, renders, and silently reports 0 for every selection.
-check('the token total reads mounted rows by name too',
-  /selectedTokens[\s\S]{0,200}?selected\.has\(row\.name\)/.test(source));
+// The selection set is keyed ONE way everywhere: `row.package ?? row.name`.
+// A mounted row whose owning package resolves (every official tool) is keyed by
+// the PACKAGE name, because that is what an exported preset can actually declare;
+// only rows with no resolvable owner (MCP tools, third-party plugin tools) fall
+// back to the tool name.
+//
+// This used to be seeded by `row.name` while the checkbox renderer keyed by
+// `row.package ?? row.name`. The mismatch meant every official row was seeded
+// under a tool name the renderer never looked up, so the tools tab showed no
+// ticks for official tools at all — only the MCP and third-party rows, whose
+// keys coincide, appeared ticked. Both checks below exist to keep that from
+// coming back: seeding and the token total must use the renderer's key rule.
+check('mounted rows are seeded by the same key the renderer uses',
+  /\.map\(\(row\) => row\.package \?\? row\.name\)/.test(source));
+// The token total reads the same keyed set the seeding wrote. Using row.name
+// there silently drops every official row and under-reports the total.
+check('the token total reads mounted rows with the same key rule too',
+  /selectedTokens[\s\S]{0,240}?selected\.has\(row\.package \?\? row\.name\)/.test(source));
+// Select-all rebuilds both tables' keys; the mounted loop must not drift back
+// to the bare tool name either.
+check('select-all keys mounted rows the same way',
+  /for \(const row of filteredMounted\) \{\s*\n\s*const key = row\.package \?\? row\.name;/.test(source));
 
 // --- The two failure modes that render a blank page --------------------
 // Both of these shipped once and produced a page with no text and no error in
