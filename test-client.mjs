@@ -128,28 +128,33 @@ check('client only requires modules it declares', (() => {
   return required.every((n) => n === 'react' || n === 'react/jsx-runtime');
 })());
 check('every fetch carries an abort deadline', /AbortController/.test(source));
-// The selection set is keyed ONE way everywhere: `row.package ?? row.name`.
-// A mounted row whose owning package resolves (every official tool) is keyed by
-// the PACKAGE name, because that is what an exported preset can actually declare;
-// only rows with no resolvable owner (MCP tools, third-party plugin tools) fall
-// back to the tool name.
+// The selection set holds PACKAGE names — that is the only thing a preset can
+// declare. A mounted row whose owning package resolves (every official tool) is
+// therefore keyed by that package name; a row with no resolvable owner (an MCP
+// tool, or a third-party plugin's own tool) is NOT selectable at all and gets a
+// disabled checkbox, so it never enters the set.
 //
 // This used to be seeded by `row.name` while the checkbox renderer keyed by
 // `row.package ?? row.name`. The mismatch meant every official row was seeded
 // under a tool name the renderer never looked up, so the tools tab showed no
 // ticks for official tools at all — only the MCP and third-party rows, whose
-// keys coincide, appeared ticked. Both checks below exist to keep that from
+// keys coincided, appeared ticked. Both checks below exist to keep that from
 // coming back: seeding and the token total must use the renderer's key rule.
-check('mounted rows are seeded by the same key the renderer uses',
-  /\.map\(\(row\) => row\.package \?\? row\.name\)/.test(source));
+check('mounted rows are seeded by owning package (not by tool name)',
+  /\.map\(\(row\) => row\.package\)/.test(source)
+  && !/\.map\(\(row\) => row\.name\)/.test(source));
 // The token total reads the same keyed set the seeding wrote. Using row.name
 // there silently drops every official row and under-reports the total.
 check('the token total reads mounted rows with the same key rule too',
   /selectedTokens[\s\S]{0,240}?selected\.has\(row\.package \?\? row\.name\)/.test(source));
-// Select-all rebuilds both tables' keys; the mounted loop must not drift back
-// to the bare tool name either.
-check('select-all keys mounted rows the same way',
-  /for \(const row of filteredMounted\) \{\s*\n\s*const key = row\.package \?\? row\.name;/.test(source));
+// Select-all rebuilds both tables' keys; the mounted loop must only take rows
+// that actually carry a package, since the others are not selectable.
+check('select-all keys mounted rows by package too',
+  /for \(const row of filteredMounted\) \{\s*\n\s*const key = row\.package;/.test(source));
+// A row with no owning package must render a DISABLED checkbox — offering a tick
+// that silently does nothing on export is worse than offering none.
+check('mounted rows without an owner package get a disabled checkbox',
+  /disabled:\s*ownerMissing/.test(source));
 
 // --- The two failure modes that render a blank page --------------------
 // Both of these shipped once and produced a page with no text and no error in
@@ -590,12 +595,13 @@ const checkboxesOf = (root) => inputsOfType(root, 'checkbox');
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// 一份「有草稿」的宿主：勾了 read，prefix/suffix 都是草稿里的值，来源是
-// 现有预设 mock-preset —— 这是「切页回来勾选还在」的种子数据。
+// 一份「有草稿」的宿主：勾了 @deepseek-ai/dsh-tool-fs，prefix/suffix 都是草稿里的值，
+// 来源是现有预设 mock-preset —— 这是「切页回来勾选还在」的种子数据。
+// ⚠️ 勾选集里存的是【包名】—— 预设只能声明包名（见 keyingNote）。
 const restoredDraftPayload = {
   ok: true,
   draft: {
-    selected: ['read'],
+    selected: ['@deepseek-ai/dsh-tool-fs'],
     personaFields: {
       prefix: '草稿恢复的前缀。',
       suffix: '草稿后缀',
@@ -617,8 +623,13 @@ const buildInteractive = (draftPayload) => {
       payload = {
         ok: true,
         mounted: [
-          { name: 'read', description: '读文件', tokens: 100 },
-          { name: 'write', description: '写文件', tokens: 200 },
+          // ⚠️ 必须带 `package` —— 宿主会给已挂行补上归属包（工具名→包名反查），
+          //    而勾选集的键就是它。没有 package 的行是不可勾的（禁用复选框）。
+          { name: 'read', description: '读文件', tokens: 100, package: '@deepseek-ai/dsh-tool-fs' },
+          { name: 'write', description: '写文件', tokens: 200, package: '@deepseek-ai/dsh-tool-fs' },
+          // 没有归属包的第三方 / MCP 工具 —— 预设声明不了它，复选框必须禁用。
+          // 排在最后，避免打乱上面按位置索引的那几条断言。
+          { name: 'zz_third_party_tool', description: '第三方注册的工具', tokens: 60 },
         ],
         mountedTokens: 300,
         availablePackages: [
@@ -784,18 +795,29 @@ const clickTab = (tree, id) => {
     String(checkboxesOf(tree)[1]?.props?.checked));
 
   // —— 核心修复：切到别的设置页再回来，草稿恢复的勾选还在 ——
-  // 注意：已挂表按「工具名」键，草稿里的勾选正是工具名，所以这里必须在
-  // 载入现有预设**之前**验证 —— 载入预设会把 packages（包名）写进勾选集，
-  // 包名只在「可挂」表按包名键可见，那是另一把尺子（见 keyingNote）。
+  // ⚠️ 勾选集里存的是【包名】（预设只能声明包名），已挂行的键也是归属包名，
+  //    所以草稿恢复后复选框必须是勾上的。
   clickTab(tree, 'tools');
   await tick();
   tree = app.getTree();
   check('the tools tab still shows the selection after switching away',
     checkboxesOf(tree).some((n) => n.props.checked === true),
     `n=${checkboxesOf(tree).length} checked=${checkboxesOf(tree).map((n) => n.props.checked).join(',')}`);
-  check('the restored tool is the one the draft selected',
-    app.getStore()?.get()?.selected?.has('read') === true,
+  check('the restored package is the one the draft selected',
+    app.getStore()?.get()?.selected?.has('@deepseek-ai/dsh-tool-fs') === true,
     `selected=${JSON.stringify([...(app.getStore()?.get()?.selected ?? [])])}`);
+  // 没有归属包的行（第三方插件 / MCP 工具）预设声明不了 —— 复选框必须是**禁用**的。
+  // 给一个点了不生效的勾选框比不给更糟：用户会以为它已经进预设了。
+  const boxes = checkboxesOf(tree);
+  check('a row with no owning package renders a disabled checkbox',
+    boxes.some((n) => n.props.disabled === true),
+    `disabled=${boxes.map((n) => n.props.disabled === true).join(',')}`);
+  check('a row with an owning package stays tickable',
+    boxes.some((n) => n.props.disabled !== true && n.props.checked === true),
+    `checked=${boxes.map((n) => n.props.checked).join(',')}`);
+  check('an ownerless row is never swallowed into the selection',
+    app.getStore()?.get()?.selected?.has('zz_third_party_tool') !== true,
+    JSON.stringify([...(app.getStore()?.get()?.selected ?? [])]));
   clickTab(tree, 'prompt');
   await tick();
   tree = app.getTree();
