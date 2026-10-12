@@ -129,28 +129,33 @@ check('client only requires modules it declares', (() => {
 })());
 check('every fetch carries an abort deadline', /AbortController/.test(source));
 // The selection set holds PACKAGE names — that is the only thing a preset can
-// declare. A mounted row whose owning package resolves (every official tool) is
-// therefore keyed by that package name; a row with no resolvable owner (an MCP
-// tool, or a third-party plugin's own tool) is NOT selectable at all and gets a
-// disabled checkbox, so it never enters the set.
+// 两分法之后，勾选集里只放【包名】，而且只有「官方工具」表能勾：
+//   · 「插件工具」表 = mounted 行里没有归属包的那些（MCP / 第三方），整张禁勾；
+//   · 「官方工具」表 = 全部官方包，按包名勾。
+// 三处必须一致：播种、全选、token 合计。
 //
-// This used to be seeded by `row.name` while the checkbox renderer keyed by
-// `row.package ?? row.name`. The mismatch meant every official row was seeded
-// under a tool name the renderer never looked up, so the tools tab showed no
-// ticks for official tools at all — only the MCP and third-party rows, whose
-// keys coincided, appeared ticked. Both checks below exist to keep that from
-// coming back: seeding and the token total must use the renderer's key rule.
+// 历史包袱：早期只按工具名播种、渲染却按包名，导致官方工具行永远显示未勾选，
+// 只有 MCP / 第三方那几行（键恰好重合）是勾着的。下面几条断言钉住现在这套规则。
 check('mounted rows are seeded by owning package (not by tool name)',
   /\.map\(\(row\) => row\.package\)/.test(source)
   && !/\.map\(\(row\) => row\.name\)/.test(source));
-// The token total reads the same keyed set the seeding wrote. Using row.name
-// there silently drops every official row and under-reports the total.
-check('the token total reads mounted rows with the same key rule too',
-  /selectedTokens[\s\S]{0,240}?selected\.has\(row\.package \?\? row\.name\)/.test(source));
-// Select-all rebuilds both tables' keys; the mounted loop must only take rows
-// that actually carry a package, since the others are not selectable.
-check('select-all keys mounted rows by package too',
-  /for \(const row of filteredMounted\) \{\s*\n\s*const key = row\.package;/.test(source));
+// The token total now sums the SELECTED OFFICIAL PACKAGES' currently mounted
+// tools — the unit you actually decide on is a package, not a single tool.
+check('the token total sums the selected official packages',
+  /const selectedTokens = officialPackages[\s\S]{0,240}?packageStats\[/.test(source));
+// Select-all must walk ONLY the official table. Walking the plugin table too
+// would push `undefined` into the set — those rows have no owning package,
+// which is exactly the bug an earlier version of this assertion guarded.
+check('select-all only walks the official package table',
+  /for \(const row of filteredAvailable\) \{\s*\n\s*const key = row\.package;/.test(source)
+  && !/for \(const row of filteredMounted\)[\s\S]{0,200}?next\.add/.test(source));
+// The split itself: the plugin table is exactly the rows with no owning package,
+// and the official table no longer hides packages that are already mounted.
+check('the plugin table is exactly the rows with no owning package',
+  /mountedAll\.filter\(\(row\) => typeof row\.package !== 'string'\)/.test(source));
+check('the official table lists every package, mounted or not',
+  !/anyMounted !== true/.test(source)
+  && /const officialPackages = useMemo\(\(\) => snapshot\?\.availablePackages \?\? \[\]/.test(source));
 // A row with no owning package must render a DISABLED checkbox — offering a tick
 // that silently does nothing on export is worse than offering none.
 check('mounted rows without an owner package get a disabled checkbox',
@@ -336,10 +341,10 @@ check('a missing token count is a word, not a dash',
   !/tokensUnknown: '—'/.test(source) && /tokensUnknown: '未知'/.test(source));
 check('the zh dictionary explains why a token count can be missing',
   /tokensUnknownTitle:/.test(source));
-check('bulk select uses the same fallback key as the per-row toggle',
-  // setAll 写 row.package 时，「已挂」表全选会往勾选集塞 undefined。
-  /const key = row\.package \?\? row\.name;/.test(source)
-  && !/const key = row\.package;\s*\n\s*if \(on\)/.test(source));
+// Bulk select must not wander into the plugin table: those rows carry no owning
+// package, so `row.package` there is undefined and would poison the set.
+check('bulk select does not walk the package-less plugin table',
+  !/for \(const row of filteredMounted\)[\s\S]{0,200}?next\.add/.test(source));
 check('the two-different-yardsticks caveat is shown to the user',
   /keyingNote:/.test(source) && /t\('keyingNote'\)/.test(source));
 check('token cost carries a relative bar so magnitudes are visible',
@@ -815,6 +820,12 @@ const clickTab = (tree, id) => {
   check('a row with an owning package stays tickable',
     boxes.some((n) => n.props.disabled !== true && n.props.checked === true),
     `checked=${boxes.map((n) => n.props.checked).join(',')}`);
+  // 两分法：官方工具（read / write）**不在**插件工具表里，而是以「包」的形式
+  // 出现在官方工具表 —— 哪怕这个包当前是挂着的（旧实现会把已挂载的包过滤掉，
+  // 于是它从两张表里一起消失，用户既看不到「现在挂着什么」也没法取消）。
+  // mock 里 dsh-tool-fs 的 anyMounted 是 true，正好验证这条。
+  check('official tools move out of the plugin table entirely',
+    boxes.length === 2, `n=${boxes.length} disabled=${boxes.map((n) => n.props.disabled === true).join(',')}`);
   check('an ownerless row is never swallowed into the selection',
     app.getStore()?.get()?.selected?.has('zz_third_party_tool') !== true,
     JSON.stringify([...(app.getStore()?.get()?.selected ?? [])]));
