@@ -526,33 +526,63 @@ check('it reports the timeout rather than a generic failure',
   && stalledPresetBody.error.includes('did not answer'),
   JSON.stringify(stalledPresetBody));
 
-console.log('\n== mounted tools come from the registry\'s public projection ==');
-// ctx.tools.schemas() is the documented call; the internal layer walk is only
-// a fallback. Prove the public path is taken and both schema shapes are read.
+console.log('\n== mounted tools are read from every registry layer ==');
+// ⚠️ The tool registry is *scoped*: `tools.layers` is a ScopedLayers holding a
+// `global` layer plus a `scoped` Map of per-scope layers. The preset's own tools
+// (`dsh-agent-preset` children) are registered into the AGENT SESSION's scope,
+// which is a *descendant* of the plugin's context — so they are invisible from
+// the global layer the plugin sits in.
+//
+// `tools.schemas()` documents its parameter as "the viewing scope (the agent);
+// omitted = the global view" — so calling it bare returns MCP-server tools plus
+// profile-level plugin tools and NOT ONE official `dsh-tool-*`. The tools tab
+// then showed no ticks after "load selection from a preset", because the rows
+// the preset names were simply absent from the table.
+//
+// Hence: walking every layer is the PRIMARY path, and `schemas()` is only a
+// supplement for builds where the internal `layers` shape is unavailable.
 const toolsCtx = fakeCtx();
 apply(toolsCtx);
 let schemasCalled = 0;
+/** Mimic `NamedEntries`: an aggregate table exposing `entries()`. */
+const entriesOf = (pairs) => ({ entries: () => pairs[Symbol.iterator]() });
 toolsCtx.provide('tools', {
+  layers: {
+    // Registered at the deployment/global layer — profile-level plugins and the
+    // MCP connector land here.
+    global: { tools: entriesOf([
+      ['compress', { description: 'Compress context', parameters: { type: 'object' } }],
+    ]) },
+    // Registered into one agent session's scope — this is where a preset's
+    // declared tools live, and the row the fix exists to surface.
+    scoped: new Map([
+      ['agent-scope-a', { tools: entriesOf([
+        ['read', { description: 'Read a file', parameters: { type: 'object' } }],
+      ]) }],
+    ]),
+  },
   schemas: () => {
     schemasCalled += 1;
     return [
-      { name: 'read', description: 'Read a file', parameters: { type: 'object' } },
       // OpenAI-style nesting must also be understood.
       { type: 'function', function: { name: 'write', description: 'Write a file', parameters: { type: 'object' } } },
     ];
   },
-  // A bogus internal shape that must NOT be consulted when schemas() works.
-  layers: { broken: { tools: { entries: () => { throw new Error('should not be reached'); } } } },
 });
 const toolsResponse = await callRoute(
   toolsCtx.routes.find((r) => r.path.endsWith('/snapshot')),
 );
 const toolsBody = jsonOf(toolsResponse);
-check('schemas() was called', schemasCalled === 1, String(schemasCalled));
-check('both schema shapes are read', toolsBody.mounted.length === 2,
+check('a tool from a SCOPED layer is surfaced (the preset case)', 
+  toolsBody.mounted.some((r) => r.name === 'read' && r.description === 'Read a file'),
   JSON.stringify(toolsBody.mounted.map((r) => r.name)));
-check('flat schema keeps its name', toolsBody.mounted.some((r) => r.name === 'read' && r.description === 'Read a file'));
-check('nested schema keeps its name', toolsBody.mounted.some((r) => r.name === 'write' && r.description === 'Write a file'));
+check('a tool from the global layer is surfaced too',
+  toolsBody.mounted.some((r) => r.name === 'compress'));
+check('schemas() still contributes as a supplement', schemasCalled >= 1, String(schemasCalled));
+check('the nested schema shape is still understood', 
+  toolsBody.mounted.some((r) => r.name === 'write' && r.description === 'Write a file'));
+check('layers and schemas are merged without duplicates', toolsBody.mounted.length === 3,
+  JSON.stringify(toolsBody.mounted.map((r) => r.name)));
 check('every mounted row carries a token estimate',
   toolsBody.mounted.every((r) => typeof r.tokens === 'number' && r.tokens > 0),
   JSON.stringify(toolsBody.mounted.map((r) => r.tokens)));
@@ -560,16 +590,44 @@ check('mountedTokens sums the rows',
   toolsBody.mountedTokens === toolsBody.mounted.reduce((n, r) => n + r.tokens, 0),
   String(toolsBody.mountedTokens));
 check('mounted rows are sorted by name',
-  toolsBody.mounted.map((r) => r.name).join() === 'read,write');
+  toolsBody.mounted.map((r) => r.name).join() === 'compress,read,write',
+  toolsBody.mounted.map((r) => r.name).join());
+// A layer whose table throws must not take the whole read down with it.
+const brokenCtx = fakeCtx();
+apply(brokenCtx);
+brokenCtx.provide('tools', {
+  layers: {
+    global: { tools: entriesOf([['ok', { description: 'Fine', parameters: {} }]]) },
+    scoped: new Map([
+      ['bad-scope', { tools: { entries: () => { throw new Error('layer blew up'); } } }],
+    ]),
+  },
+});
+const brokenBody = jsonOf(await callRoute(
+  brokenCtx.routes.find((r) => r.path.endsWith('/snapshot')),
+));
+check('a throwing scoped layer does not sink the whole table',
+  brokenBody.ok === true && brokenBody.mounted.some((r) => r.name === 'ok'),
+  JSON.stringify(brokenBody.mounted?.map((r) => r.name)));
 
 // --- Mounted rows must carry a resolved `package` ----------------------
 // The client renders both tables with `row.package`, but the runtime tool
 // registry only knows tool *names*. Without this enrichment every mounted row
 // yielded undefined and the render threw on `.replace`, blanking the tools tab.
 console.log('\n== mounted rows gain a package for the shared render path ==');
-check('every mounted row exposes a package field (possibly undefined)',
-  toolsBody.mounted.every((r) => Object.prototype.hasOwnProperty.call(r, 'package')),
-  JSON.stringify(toolsBody.mounted.map((r) => r.package)));
+// Two halves, both load-bearing:
+//   · a row whose owner IS in the install catalogue gains that package name, so
+//     the client can key it against a preset's package list;
+//   · a row with no owner (an MCP tool, or a third-party plugin's own tool) must
+//     still come through as a usable row — the client falls back to `row.name`.
+// JSON drops `undefined`, so an unresolvable row simply has no `package` key.
+check('a resolvable row gains its owning package',
+  toolsBody.mounted.filter((r) => r.name === 'read' || r.name === 'write')
+    .every((r) => typeof r.package === 'string'),
+  JSON.stringify(toolsBody.mounted.map((r) => [r.name, r.package])));
+check('an unresolvable row still comes through as a usable row',
+  toolsBody.mounted.some((r) => r.name === 'compress' && !('package' in r)),
+  JSON.stringify(toolsBody.mounted.map((r) => r.name)));
 // `read`/`write` are shipped by a real package, so the reverse index should
 // resolve at least one of them on this machine's actual install.
 const resolvedPackages = toolsBody.mounted.map((r) => r.package).filter((p) => typeof p === 'string');

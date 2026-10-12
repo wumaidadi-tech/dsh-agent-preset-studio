@@ -28,7 +28,7 @@
 
 | 分区 | 来源 | 一行是什么 | 能出现什么 |
 |---|---|---|---|
-| **已注册工具（运行时）** | `ctx.get('tools')` 逐层遍历运行时注册表 | 一个**工具** | 官方工具 + MCP 工具 + 第三方插件工具 |
+| **已注册工具（运行时）** | 遍历 `ctx.get('tools')` 注册表的**所有层**（全局层 + 每个 agent 作用域层） | 一个**工具** | 官方工具 + MCP 工具 + 第三方插件工具 |
 | **可挂载的内置工具包** | 扫描 `app.asar` 的 `node_modules/@deepseek-ai/dsh-tool-*` 目录 | 一个**包** | 只有官方 `@deepseek-ai/*` 包 |
 
 - 每行显示工具名 / 包名、它 ship 的工具、以及 **prefix token 估算**（触发函数定义的大小）。
@@ -258,7 +258,7 @@ ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
 
 ---
 
-## 五个不显眼但要命的约束
+## 六个不显眼但要命的约束
 
 ### 1. ⚠️ 路由 handler 是 `node:http` 契约，不是 Fetch
 
@@ -306,7 +306,50 @@ handler: (request) => json({ ok: true })                              // ❌ 永
 
 `test-client.mjs` 里有三条断言分别钉住播种、合计、全选三处的键规则。
 
-### 4. ⚠️ Electron 会拦截 `openSync('.../app.asar')`（只在运行时炸）
+### 4. ⚠️ 工具注册表是**按作用域分层**的 —— `schemas()` 只给全局视图
+
+这是「已注册工具」这张表最容易查错的地方。
+
+`ctx.get('tools')` 返回的 `ToolRuntime` 内部是
+
+```js
+layers = new ScopedLayers((scope) => new ToolLayer(scope), …)
+// ScopedLayers = { global: ToolLayer, scoped: Map<scope, ToolLayer> }
+// ToolLayer    = { tools: NamedEntries, restrictions, guards, mode }
+```
+
+而它的公开投影签名是：
+
+```js
+/**
+ * @param scope - the viewing scope (the agent); omitted = the global view.
+ */
+schemas(scope) { … }
+```
+
+**不传 `scope` 就是「全局视图」**，只能看到在**全局层**注册的工具。
+而 `dsh-agent-preset` 是把预设里声明的工具注册进**该 agent 会话的作用域层**的 ——
+那是插件所在上下文的**后代**作用域，从全局层根本看不见。
+
+只调 `schemas()` 的后果（真踩过）：
+
+- 表里只剩 MCP 服务器的工具 + profile 级插件自己注册的工具；
+  **一个官方 `dsh-tool-*` 都没有**（`read` / `write` / `edit` / `glob` / `grep` / `pwsh` …全部缺席）。
+- 于是「从预设载入勾选」之后这一表永远没有勾 —— 勾选题里的键在表里根本没有对应行。
+- 连带把 `anyMounted` 也带偏了：**已经挂载的包被标成「未挂」**，出现在「可挂载」那侧。
+
+修法：**遍历所有层**（`layers.global` + `layers.scoped` 的每个值），
+每层取 `layer.tools.entries()`；`schemas()` 降级为补漏（当 `layers` 这个内部结构不存在时仍可用）。
+两层都要做，`rows` 那个 Map 负责跨层去重。
+
+⚠️ 别用 `Object.keys(tools.layers)` 去遍历 —— `ScopedLayers` 的实例属性是
+`global` / `scoped` / `createLayer` / `onChange`，逐键取 `.tools` 只会取到 `global`，
+`scoped` 是个 `Map` 而**不是**层本身。
+
+`test-host.mjs` 里有断言钉住：作用域层的工具必须出现在表里、
+全局层的也要在、抛错的单层不能带崩整张表。
+
+### 5. ⚠️ Electron 会拦截 `openSync('.../app.asar')`（只在运行时炸）
 
 `fs.openSync('<DSH 安装目录>/resources/app.asar')`（路径换成你机器上实际的 DSH 安装目录）
 **在纯 Node 里成功（121,348,951 字节），在 Electron 主进程里报 ENOENT。**
@@ -327,7 +370,7 @@ handler: (request) => json({ ok: true })                              // ❌ 永
 > 这个 bug 藏了很久，因为 `openAsarIndex()` 当时用裸 `catch {}` 把所有失败都变成
 > 「一个包都没有」。**停止吞异常**之后它当场现形 —— 见下面第 5 条。
 
-### 5. 打开归档必须关 fd，失败必须抛
+### 6. 打开归档必须关 fd，失败必须抛
 
 早先 `openAsarIndex` 只 open 不 close，每次调用漏一个 fd。
 实测第 **8189** 次失败：`EMFILE: too many open files`（用户每点一次「重新扫描」就漏一个）。
