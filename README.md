@@ -1,6 +1,6 @@
 # Agent 预设工作室 · Agent Preset Studio
 
-`@local/dsh-agent-preset-studio` —— 一个 DeepSeek Harness 插件。
+`dsh-agent-preset-studio` —— 一个 DeepSeek Harness 插件。
 
 查看**全部工具**（已挂 + 可挂未挂）、勾选要挂哪些、编辑**系统提示词**并实时估算 token，
 最后导出一份可安装的预设包并直接装进 profile。
@@ -16,7 +16,8 @@
 
 > 生成一个 bundle patch → 交给 `pluginManager.installBundle(绝对路径)` 安装
 
-插件就是把这个流程做成图形界面。写文件永远发生在工作区，profile 的
+插件就是把这个流程做成图形界面。写文件只发生在 `~/.dsh/agent-preset-studio/`
+（或你指定的输出目录），profile 的
 `package.json` / `cordis.patch.yml` 从不由本插件直接改。
 
 ---
@@ -103,9 +104,7 @@
 「选好的东西切个页就没了」的根因：勾选状态之前只活在**前端内存**里，
 组件一切走（切页、刷新、重开窗口）就重建，选择全清空。现在勾选会存到宿主文件：
 
-- **草稿文件位置**：插件目录旁的 `.studio-draft.json`
-  （`<插件目录>/.studio-draft.json`）。插件目录不可写时退回系统临时目录
-  `dsh-agent-preset-studio/draft.json`。
+- **草稿文件位置**：`~/.dsh/agent-preset-studio/draft.json`。
 - **里面存什么**：工具勾选、persona 四字段、正在编辑的预设来源（`source`）。
 - **什么时候写**：界面变化后**防抖 500ms** 落盘，内容没变不写；写失败**静默**
   不打断操作 —— 下次打开看到的是最近一次成功的状态。
@@ -119,32 +118,23 @@
 
 ## 安装
 
-DSH 自带的 pnpm 不是一个独立可执行文件，要用 Electron 当 Node 来跑它。
-下面的 `<DSH 根目录>` 换成**你的** DeepSeek Harness 安装目录
-（Windows 默认通常在 `C:/Users/<用户名>/AppData/Local/Programs/` 下），
-`<profile 名>` 换成你的 profile 名字（常见是 `desktop`）：
+插件已发布到 npm：**`dsh-agent-preset-studio`**。
+
+推荐在 DSH 桌面端「设置 → 插件」里搜索安装；也可以在 profile 目录里手动装：
 
 ```bash
 cd ~/.dsh/profiles/<profile 名>
-ELECTRON_RUN_AS_NODE=1 "<DSH 根目录>/DeepSeek Harness.exe" \
-  "<DSH 根目录>/resources/runtime/pnpm/bin/pnpm.cjs" add "<本插件 clone 到的目录>"
+pnpm add dsh-agent-preset-studio
 ```
 
-然后**手动**往该 profile 的 `package.json` 里加两处：
-
-```json
-// dsh.profile.bundles —— 加一行
-"@local/dsh-agent-preset-studio"
-
-// dependencies —— 加一项（用 link: 指向你的 clone 目录）
-"@local/dsh-agent-preset-studio": "link:<本插件 clone 到的目录>"
-```
-
-> pnpm 只负责写 `dependencies`；一个包要不要被加载，由 `bundles` 列表决定。
-> 两处都写了才会生效。（本插件的 `installBundle` 路径会自动完成这两步，
-> 这里是手装时的说明。）
+> pnpm 只负责写 `dependencies`；一个包要不要被加载，由 `package.json` 的
+> `dsh.profile.bundles` 名单决定。桌面端插件页会自动维护这份名单；
+> 手动安装时记得把 `dsh-agent-preset-studio` 也加进 `bundles`。
 
 **重启 DSH 生效**（新增 bundle 需要重新走一遍加载链）。
+
+导出的预设与勾选草稿统一放在 `~/.dsh/agent-preset-studio/`，
+与插件安装位置无关，升级插件不会丢。
 
 ---
 
@@ -175,7 +165,7 @@ node test-install.mjs   # 安装预检（manifest / 链接 / 双端可加载性�
 
 ### 症状
 
-导出预设时界面**报成功**、`lib/generated/<id>/` 目录也生成了、`node_modules` 里
+导出预设时界面**报成功**、`~/.dsh/agent-preset-studio/generated/<id>/` 目录也生成了、`node_modules` 里
 软链也建好了，但**重启 DSH 还是看不到这个预设**，`package.json` 的
 `dsh.profile.bundles` 里也**没有**它。
 
@@ -408,7 +398,7 @@ test-host.mjs         宿主半功能测试（含覆盖写边界、草稿降级�
 test-client.mjs       客户端结构测试 + 交互层模拟测试
 test-install.mjs      安装预检
 README.md             本文件
-generated/            导出的预设包落在默认输出目录下
+~/.dsh/agent-preset-studio/generated/   导出的预设包（默认落点，与插件安装位置无关）
 ```
 
 ---
@@ -461,7 +451,7 @@ generated/            导出的预设包落在默认输出目录下
 - **本项目按「原样」提供，不附带任何形式的担保**，包括但不限于对适销性、
   特定用途适用性及不侵权的担保。
 - 插件会**读取**本机 DSH 安装包（`app.asar`）以枚举可挂载的工具包，
-  并在**工作区目录**内写出文件。它**不修改** profile 的 `package.json` /
+  并在 `~/.dsh/agent-preset-studio/`（或你指定的输出目录）写出文件。它**不修改** profile 的 `package.json` /
   `cordis.patch.yml`，安装动作由宿主提供的 `pluginManager.installBundle()` 完成。
 - 作者不对使用本插件导致的任何数据丢失、DSH 配置损坏或其他损害负责。
   **使用前请自行备份 `~/.dsh/profiles/` 目录**。

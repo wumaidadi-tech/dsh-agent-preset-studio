@@ -1,9 +1,10 @@
 {
-  "name": "@local/dsh-agent-preset-studio",
-  "version": "0.2.0",
-  "private": true,
+  "name": "dsh-agent-preset-studio",
+  "version": "0.2.2",
   "type": "module",
   "description": "Agent preset studio: inspect every mounted tool, edit the system prompt, and save the result as an installable preset bundle. · Agent 预设工作室：查看全部工具、编辑系统提示词、存成可安装的预设包。",
+  "license": "MIT",
+  "author": "wumaidadi-tech",
   "icon": "./icon.svg",
   "main": "lib/index.js",
   "exports": {
@@ -17,6 +18,21 @@
     "icon.svg",
     "cordis.patch.yml"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent-preset",
+    "preset"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wumaidadi-tech/dsh-agent-preset-studio.git"
+  },
+  "homepage": "https://github.com/wumaidadi-tech/dsh-agent-preset-studio#readme",
+  "bugs": {
+    "url": "https://github.com/wumaidadi-tech/dsh-agent-preset-studio/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

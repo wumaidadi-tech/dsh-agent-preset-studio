@@ -3,4 +3,4 @@
 # its ./client bundle as the browser half.
 - insert:
     - id: agent-preset-studio
-      name: '@local/dsh-agent-preset-studio'
+      name: 'dsh-agent-preset-studio'
